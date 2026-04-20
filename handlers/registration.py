@@ -15,16 +15,15 @@ from database.engine import get_session
 from database.models import User
 from database.crud import delete_user_by_id
 
+from utils.districts import MOSCOW_DISTRICTS
+from keyboards.inline import get_districts_keyboard
+
+
 logger = logging.getLogger(__name__)
 router = Router(name="registration")
 
-# ---------- FSM для регистрации ----------
-class RegistrationStates(StatesGroup):
-    waiting_name = State()
-    waiting_birthday = State()
-    waiting_brand = State()
-    waiting_model = State()
-    waiting_year = State()
+from keyboards.inline import get_districts_keyboard
+from states.registration import RegistrationStates
 
 # ---------- FSM для редактирования профиля ----------
 class EditProfileStates(StatesGroup):
@@ -33,6 +32,7 @@ class EditProfileStates(StatesGroup):
     editing_birthday = State()
     editing_brand = State()
     editing_model = State()
+    editing_district = State()
 
 # ---------- Загрузка мотоциклов ----------
 MOTORCYCLES_FILE = Path(__file__).resolve().parent.parent / "data" / "motorcycles.json"
@@ -55,7 +55,7 @@ def get_user(tg_id: int) -> Optional[User]:
     with get_session() as s:
         return s.query(User).filter(User.telegram_id == tg_id).first()
 
-def upsert_user(tg_id: int, username: Optional[str], name: str, birthday: str, brand: str, model: str):
+def upsert_user(tg_id: int, username: Optional[str], name: str, birthday: str, brand: str, model: str, district: Optional[str] = None):
     with get_session() as s:
         u = s.query(User).filter(User.telegram_id == tg_id).first()
         if u:
@@ -64,6 +64,8 @@ def upsert_user(tg_id: int, username: Optional[str], name: str, birthday: str, b
             u.birthday = birthday
             u.bike_brand = brand
             u.bike_model = model
+            if district is not None:
+                u.district = district
         else:
             s.add(User(
                 telegram_id=tg_id,
@@ -72,6 +74,7 @@ def upsert_user(tg_id: int, username: Optional[str], name: str, birthday: str, b
                 birthday=birthday,
                 bike_brand=brand,
                 bike_model=model,
+                district=district,
             ))
 
 # ---------- Клавиатуры ----------
@@ -194,23 +197,58 @@ async def brand_step(callback: CallbackQuery, state: FSMContext):
     await state.set_state(RegistrationStates.waiting_model)
     await callback.message.answer("Выберите модель:", reply_markup=kb_models(brand))
 
+
 @router.callback_query(RegistrationStates.waiting_model, F.data.startswith("reg:model:"))
 async def model_step(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     model = callback.data.split(":", 2)[2]
     await state.update_data(model=model)
-    await state.set_state(RegistrationStates.waiting_year)
-    await callback.message.answer("📅 Год выпуска (4 цифры) или <code>-</code>:", reply_markup=kb_cancel())
+    await state.set_state(RegistrationStates.waiting_district)
+    await callback.message.answer(
+        "Выберите округ Москвы, в котором вы обычно катаетесь:",
+        reply_markup=get_districts_keyboard()
+    )
+
+@router.callback_query(RegistrationStates.waiting_district, F.data.startswith("district:"))
+async def district_step(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    district = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    # Сохраняем все данные, включая округ
+    upsert_user(
+        tg_id=callback.from_user.id,
+        username=callback.from_user.username,
+        name=data["name"],
+        birthday=data["birthday"],
+        brand=data["brand"],
+        model=data["model"],
+        district=district
+    )
+    await state.clear()
+    await callback.message.answer(
+        f"✅ Готово! Вы зарегистрированы.\n\n"
+        f"Имя: {data['name']}\n"
+        f"ДР: {data['birthday']}\n"
+        f"Мото: {data['brand']} {data['model']}\n"
+        f"Округ: {district}"
+    )
+    # Отправка уведомления в группу (опционально)
+    if GROUP_CHAT_ID:
+        try:
+            await callback.bot.send_message(
+                GROUP_CHAT_ID,
+                f"👋 Новый участник: {data['name']} — {data['brand']} {data['model']}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to notify group: {e}")
+
+
+
 
 @router.message(RegistrationStates.waiting_year)
 async def year_step(message: Message, state: FSMContext):
     year_text = (message.text or "").strip()
-    year = None
-    if year_text != "-":
-        if not year_text.isdigit() or len(year_text) != 4:
-            await message.answer("❌ Введите год (4 цифры) или -")
-            return
-        year = int(year_text)
+    # Год не сохраняем (можно игнорировать)
     data = await state.get_data()
     upsert_user(
         tg_id=message.from_user.id,
@@ -219,6 +257,7 @@ async def year_step(message: Message, state: FSMContext):
         birthday=data["birthday"],
         brand=data["brand"],
         model=data["model"],
+        district=data.get("district")
     )
     await state.clear()
     await message.answer(
@@ -226,7 +265,7 @@ async def year_step(message: Message, state: FSMContext):
         f"Имя: {data['name']}\n"
         f"ДР: {data['birthday']}\n"
         f"Мото: {data['brand']} {data['model']}"
-        + (f"\nГод: {year}" if year else "")
+        + (f"\nОкруг: {data.get('district', 'не указан')}" if data.get('district') else "")
     )
     if GROUP_CHAT_ID:
         try:
@@ -236,6 +275,7 @@ async def year_step(message: Message, state: FSMContext):
             )
         except Exception as e:
             logger.warning(f"Failed to notify group: {e}")
+
 
 # ---------- Профиль ----------
 @router.message(Command("my_profile"))
@@ -254,6 +294,7 @@ async def my_profile_cmd(message: Message):
             f"👤 Имя: {user.name}\n"
             f"🎂 Дата рождения: {user.birthday or 'не указана'}\n"
             f"🏍 Мотоцикл: {user.bike_brand} {user.bike_model or ''}\n"
+            f"🗺 Округ: {user.district or 'не указан'}\n"
             f"📅 Зарегистрирован: {user.registered_at.strftime('%d.%m.%Y %H:%M') if user.registered_at else 'неизвестно'}"
         )
         await message.answer(text, parse_mode="Markdown")
@@ -274,6 +315,7 @@ async def edit_profile_cmd(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🎂 Дата рождения", callback_data="edit:birthday")],
         [InlineKeyboardButton(text="🏍 Марка", callback_data="edit:brand")],
         [InlineKeyboardButton(text="🔧 Модель", callback_data="edit:model")],
+        [InlineKeyboardButton(text="🗺 Округ", callback_data="edit:district")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="edit:cancel")]
     ])
     await state.set_state(EditProfileStates.choosing_field)
@@ -297,6 +339,13 @@ async def edit_choose_field(callback: CallbackQuery, state: FSMContext):
     elif action == "brand":
         await state.set_state(EditProfileStates.editing_brand)
         await callback.message.answer("Выберите новую марку:", reply_markup=kb_brands())
+    
+    elif action == "district":
+        await state.set_state(EditProfileStates.editing_district)
+        await callback.message.answer(
+            "Выберите новый округ Москвы:",
+            reply_markup=get_districts_keyboard()
+    )
     elif action == "model":
         brand = None
         with get_session() as session:
@@ -425,3 +474,15 @@ async def cancel_delete_callback(callback: CallbackQuery):
     await callback.answer()
     await callback.message.edit_text("✅ Удаление отменено.")
     await callback.message.edit_reply_markup(reply_markup=None)
+
+@router.callback_query(EditProfileStates.editing_district, F.data.startswith("district:"))
+async def edit_district(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    district = callback.data.split(":", 1)[1]
+    with get_session() as session:
+        user = session.query(User).filter(User.telegram_id == callback.from_user.id).first()
+        if user:
+            user.district = district
+            session.commit()
+    await state.clear()
+    await callback.message.answer(f"✅ Округ обновлён на {district}.")

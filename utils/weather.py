@@ -62,7 +62,6 @@ async def get_forecast():
                 temps = [item['main']['temp'] for item in data['list']]
                 temp_min = min(temps)
                 temp_max = max(temps)
-                # берём первое описание погоды
                 desc = data['list'][0]['weather'][0]['description']
                 return {
                     'temp_min': round(temp_min),
@@ -71,4 +70,30 @@ async def get_forecast():
                 }
     except Exception as e:
         logger.error(f"Forecast error: {e}")
+        return None
+
+async def get_weather_by_coords(lat: float, lon: float):
+    """Возвращает словарь с текущей погодой по координатам."""
+    url = f"http://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                if resp.status != 200:
+                    logger.error(f"Weather API error for coords: {data}")
+                    return None
+                temp = data['main']['temp']
+                feels_like = data['main']['feels_like']
+                humidity = data['main']['humidity']
+                wind_speed = data['wind']['speed']
+                description = data['weather'][0]['description']
+                return {
+                    'temp': round(temp),
+                    'feels_like': round(feels_like),
+                    'humidity': humidity,
+                    'wind_speed': round(wind_speed),
+                    'description': description,
+                }
+    except Exception as e:
+        logger.error(f"Weather by coords error: {e}")
         return None

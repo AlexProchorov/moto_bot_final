@@ -294,13 +294,15 @@ async def end_ride_cmd(message: Message):
         return
     if ride["message_thread_id"]:
         try:
-            await message.bot.edit_forum_topic(GROUP_CHAT_ID, ride["message_thread_id"], name=f"📦 Архив: {ride['title']}")
-            await message.bot.close_forum_topic(GROUP_CHAT_ID, ride["message_thread_id"])
+            await message.bot.delete_forum_topic(GROUP_CHAT_ID, ride["message_thread_id"])
+            logger.info(f"Удалена тема заезда {ride_id}")
         except Exception as e:
-            logger.error(f"Ошибка закрытия темы: {e}")
+            logger.error(f"Ошибка удаления темы: {e}")
     end_ride(ride_id)
-    await message.answer(f"✅ Заезд «{ride['title']}» завершён и архивирован.")
-    await message.bot.send_message(GROUP_CHAT_ID, f"🏁 Заезд «{ride['title']}» завершён. Тема закрыта.")
+    await message.answer(f"✅ Заезд «{ride['title']}» завершён и удалён.")
+    await message.bot.send_message(GROUP_CHAT_ID, f"🏁 Заезд «{ride['title']}» завершён. Тема удалена.")
+
+
 
 # ---------- Главное меню поездок ----------
 @router.message(Command("ride_menu"))

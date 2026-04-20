@@ -7,3 +7,4 @@ class RegistrationStates(StatesGroup):
     waiting_model = State()
     waiting_year = State()
     confirm = State()
+    waiting_district = State() 

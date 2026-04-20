@@ -1,9 +1,9 @@
 # database/crud.py
 from sqlalchemy import func
 from .engine import get_session
-from .models import User
 from datetime import datetime, timedelta
 import logging
+
 
 
 from sqlalchemy import and_
@@ -89,13 +89,18 @@ def user_exists(telegram_id: int) -> bool:
         return session.query(User).filter(User.telegram_id == telegram_id).first() is not None
 
 def get_today_birthdays():
-    """Возвращает список пользователей, у которых сегодня день рождения (ДД.ММ совпадает)."""
-    today = datetime.now()
-    today_str = today.strftime("%d.%m")
+    """Возвращает список именинников сегодня с полями id, name, username."""
+    today_str = datetime.now().strftime("%d.%m")
     with get_session() as session:
         users = session.query(User).filter(User.birthday == today_str).all()
-        return [{"id": u.telegram_id, "name": u.name} for u in users]
-
+        result = []
+        for u in users:
+            result.append({
+                "id": u.telegram_id,
+                "name": u.name if u.name else "Неизвестный",
+                "username": u.username
+            })
+        return result
 
 
 
@@ -272,3 +277,14 @@ def clear_today_active_topic():
     with get_session() as session:
         session.query(DailyActiveTopic).filter(DailyActiveTopic.date == today_str).delete()
         session.commit()
+
+def get_users_with_district():
+    with get_session() as session:
+        users = session.query(User).filter(User.district.isnot(None)).all()
+        return [{"id": u.telegram_id, "name": u.name, "district": u.district} for u in users]
+
+def get_users_by_district(district: str):
+    """Возвращает список пользователей с указанным округом (id, name, username)."""
+    with get_session() as session:
+        users = session.query(User).filter(User.district == district).all()
+        return [{"id": u.telegram_id, "name": u.name, "username": u.username} for u in users]

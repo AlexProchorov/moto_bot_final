@@ -43,3 +43,20 @@ def get_models_keyboard(brand, models):
         InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
     ])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+from utils.districts import MOSCOW_DISTRICTS
+
+def get_districts_keyboard():
+    """Клавиатура с округами Москвы (3 кнопки в ряд)"""
+    keyboard = []
+    row = []
+    for i, district in enumerate(MOSCOW_DISTRICTS, 1):
+        row.append(InlineKeyboardButton(text=district, callback_data=f"district:{district}"))
+        if i % 3 == 0:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back")])
+    keyboard.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)

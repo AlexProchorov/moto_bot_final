@@ -16,6 +16,7 @@ from handlers import registration, admin, common, group_events   # Добавь�
 from handlers import ride_commands   
 from utils.ride_scheduler import check_expired_active_users, check_expired_rides
 from utils.ride_scheduler import cleanup_daily_topics
+from utils.ride_scheduler import cleanup_daily_topics
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ async def set_commands(bot: Bot):
         BotCommand(command="delete_my_profile", description="Удалить анкету"),
         BotCommand(command="weather_now", description="Погода сейчас"),
         BotCommand(command="ride_menu", description="🏍 Меню покатушек"),
+        BotCommand(command="neighbors", description="Кто живёт в моём округе"), 
     ]
     await bot.set_my_commands(common_commands, scope=BotCommandScopeAllPrivateChats())
 
