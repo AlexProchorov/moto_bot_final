@@ -1,9 +1,11 @@
 import aiohttp
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import WEATHER_API_KEY, WEATHER_CITY
 
 logger = logging.getLogger(__name__)
+
+# ========== Основные функции погоды ==========
 
 async def get_current_weather():
     """Возвращает словарь с текущей погодой."""
@@ -97,3 +99,35 @@ async def get_weather_by_coords(lat: float, lon: float):
     except Exception as e:
         logger.error(f"Weather by coords error: {e}")
         return None
+
+# ========== Кеширование погоды по районам ==========
+_weather_cache = {}
+CACHE_TTL = 1800  # 30 минут
+
+def _is_cache_valid(district: str) -> bool:
+    entry = _weather_cache.get(district)
+    if not entry:
+        return False
+    return datetime.now() < entry["expires_at"]
+
+def _set_cache(district: str, weather_data: dict):
+    _weather_cache[district] = {
+        "weather": weather_data,
+        "expires_at": datetime.now() + timedelta(seconds=CACHE_TTL)
+    }
+
+async def get_weather_cached(district: str) -> dict | None:
+    """Возвращает погоду для района из кеша или запрашивает с API."""
+    from utils.districts import DISTRICT_COORDS
+    if _is_cache_valid(district):
+        logger.debug(f"Возвращаем кешированную погоду для района {district}")
+        return _weather_cache[district]["weather"]
+    coords = DISTRICT_COORDS.get(district)
+    if not coords:
+        logger.warning(f"Нет координат для района {district}")
+        return None
+    weather = await get_weather_by_coords(coords['lat'], coords['lon'])
+    if weather:
+        _set_cache(district, weather)
+        logger.info(f"Обновлён кеш для района {district}")
+    return weather

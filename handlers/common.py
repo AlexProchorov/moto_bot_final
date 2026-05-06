@@ -3,9 +3,10 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from database.engine import get_session
 from database.models import User
-from utils.weather import get_current_weather, get_weather_by_coords, clothing_recommendation
 from utils.districts import DISTRICT_COORDS
 from database.crud import get_users_by_district
+from utils.weather import get_current_weather, get_weather_by_coords, get_weather_cached, clothing_recommendation
+
 
 router = Router()
 
@@ -31,7 +32,7 @@ async def weather_now(message: Message):
 
     if district and district in DISTRICT_COORDS:
         coords = DISTRICT_COORDS[district]
-        weather = await get_weather_by_coords(coords['lat'], coords['lon'])
+        weather = await get_weather_cached(district)
         if weather:
             text_parts.append(
                 f"🌤 *Погода в вашем районе ({district}):*\n"
@@ -71,35 +72,26 @@ async def neighbors_cmd(message: Message):
     with get_session() as session:
         user = session.query(User).filter(User.telegram_id == user_id).first()
         if not user:
-            await message.answer("❌ Вы не зарегистрированы. Пожалуйста, зарегистрируйтесь с помощью /start.")
+            await message.answer("❌ Вы не зарегистрированы.")
             return
         district = user.district
         if not district:
-            await message.answer(
-                "❌ У вас не указан округ проживания.\n"
-                "Вы можете указать его в профиле: /edit_my_profile → Округ."
-            )
+            await message.answer("❌ У вас не указан округ. Используйте /edit_my_profile.")
             return
 
     users = get_users_by_district(district)
-    count = len(users)
-    if count == 0:
-        await message.answer(f"📭 В вашем округе **{district}** пока нет других зарегистрированных участников.", parse_mode="Markdown")
+    neighbors = [u for u in users if u['id'] != user_id]
+    if not neighbors:
+        await message.answer(f"👤 Вы единственный участник в округе {district}.", parse_mode="HTML")
         return
 
     lines = []
-    for u in users:
-        if u['id'] == user_id:
-            continue
+    for u in neighbors:
         name = u['name'] or "Участник"
         username = u['username']
         if username:
             lines.append(f"• {name} (@{username})")
         else:
             lines.append(f"• {name}")
-    if not lines:
-        await message.answer(f"👤 Вы единственный зарегистрированный участник в округе **{district}**.", parse_mode="Markdown")
-        return
-
-    text = f"🏘 *В вашем округе {district} проживает {len(lines)} участник(а):*\n\n" + "\n".join(lines)
-    await message.answer(text, parse_mode="Markdown")
+    text = f"🏘 <b>В вашем округе {district} проживает {len(neighbors)} участник(а):</b>\n\n" + "\n".join(lines)
+    await message.answer(text, parse_mode="HTML")

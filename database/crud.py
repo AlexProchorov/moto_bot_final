@@ -3,10 +3,8 @@ from sqlalchemy import func
 from .engine import get_session
 from datetime import datetime, timedelta
 import logging
+from sqlalchemy import and_, or_
 
-
-
-from sqlalchemy import and_
 
 from .models import DailyActiveTopic
 from .models import User, Ride, RideParticipant, DailyActiveTopic, Setting
@@ -288,3 +286,134 @@ def get_users_by_district(district: str):
     with get_session() as session:
         users = session.query(User).filter(User.district == district).all()
         return [{"id": u.telegram_id, "name": u.name, "username": u.username} for u in users]
+
+
+# ========== Игровые функции ==========
+from sqlalchemy import and_, or_
+from .models import Game, GameMove, PlayerStats
+
+def get_active_game(player_id: int):
+    """Возвращает активную игру, в которой участвует игрок."""
+    with get_session() as session:
+        return session.query(Game).filter(
+            and_(
+                Game.status == 'active',
+                or_(Game.player_x_id == player_id, Game.player_o_id == player_id)
+            )
+        ).first()
+
+def create_game(chat_id: int, thread_id: int, player_x_id: int, player_o_id: int, first_player_id: int):
+    """Создаёт новую игру и возвращает объект Game."""
+    with get_session() as session:
+        game = Game(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            player_x_id=player_x_id,
+            player_o_id=player_o_id,
+            turn_id=first_player_id,
+            board=' ' * 9,
+            status='active'
+        )
+        session.add(game)
+        session.commit()
+        return game
+
+def save_move(game_id: int, player_id: int, position: int, symbol: str):
+    with get_session() as session:
+        move = GameMove(game_id=game_id, player_id=player_id, position=position, symbol=symbol)
+        session.add(move)
+        session.commit()
+
+
+def _update_stats(player_x_id: int, player_o_id: int, winner_id: int = None):
+    with get_session() as session:
+        for pid in (player_x_id, player_o_id):
+            stats = session.query(PlayerStats).filter(PlayerStats.telegram_id == pid).first()
+            if not stats:
+                stats = PlayerStats(telegram_id=pid, games_played=0, games_won=0, games_drawn=0)
+                session.add(stats)
+            stats.games_played += 1
+            if winner_id is None:
+                stats.games_drawn += 1
+            elif pid == winner_id:
+                stats.games_won += 1
+            session.commit()
+
+def finish_game(game_id: int, winner_id=None):
+    """Завершает игру, обновляет статус и статистику."""
+    from datetime import datetime
+    with get_session() as session:
+        game = session.query(Game).filter(Game.id == game_id).first()
+        if not game:
+            return
+        if game.status == 'finished':
+            return
+        game.status = 'finished'
+        game.finished_at = datetime.now()
+        if winner_id:
+            game.winner_id = winner_id
+        session.commit()
+        # Обновляем статистику
+        _update_stats(game.player_x_id, game.player_o_id, winner_id)
+        return game
+
+def _update_stats(player_x_id: int, player_o_id: int, winner_id: int = None):
+    with get_session() as session:
+        for pid in (player_x_id, player_o_id):
+            stats = session.query(PlayerStats).filter(PlayerStats.telegram_id == pid).first()
+            if not stats:
+                stats = PlayerStats(telegram_id=pid, games_played=0, games_won=0, games_drawn=0)
+                session.add(stats)
+            stats.games_played += 1
+            if winner_id is None:
+                stats.games_drawn += 1
+            elif pid == winner_id:
+                stats.games_won += 1
+            session.commit()
+
+
+def get_player_stats(telegram_id: int):
+    with get_session() as session:
+        stats = session.query(PlayerStats).filter(PlayerStats.telegram_id == telegram_id).first()
+        if not stats:
+            return {"games_played": 0, "games_won": 0, "games_drawn": 0}
+        return {"games_played": stats.games_played, "games_won": stats.games_won, "games_drawn": stats.games_drawn}
+
+
+def get_stale_game_for_player(player_id: int, timeout_hours=168):  # 7 дней
+    """Возвращает активную игру игрока, если последний ход был более timeout_hours назад."""
+    from datetime import datetime, timedelta
+    with get_session() as session:
+        threshold = datetime.now() - timedelta(hours=timeout_hours)
+        return session.query(Game).filter(
+            Game.status == 'active',
+            or_(Game.player_x_id == player_id, Game.player_o_id == player_id),
+            Game.last_move_at <= threshold
+        ).first()
+
+def auto_abandon_stale_game(player_id: int):
+    """Завершает зависшую игру игрока ничьёй и возвращает True, если была завершена."""
+    game = get_stale_game_for_player(player_id)
+    if game:
+        finish_game(game.id, winner=None)
+        return True
+    return False
+
+
+def get_stale_game_for_player(player_id: int, timeout_hours=168):  # 7 дней
+    from datetime import datetime, timedelta
+    with get_session() as session:
+        threshold = datetime.now() - timedelta(hours=timeout_hours)
+        return session.query(Game).filter(
+            Game.status == 'active',
+            or_(Game.player_x_id == player_id, Game.player_o_id == player_id),
+            Game.last_move_at <= threshold
+        ).first()
+
+def auto_abandon_stale_game(player_id: int):
+    """Завершает зависшую игру игрока ничьёй и возвращает True, если была завершена."""
+    game = get_stale_game_for_player(player_id)
+    if game:
+        finish_game(game.id, winner=None)
+        return True
+    return False

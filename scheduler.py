@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import random
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from aiogram import Bot
 from database.crud import get_today_birthdays
 from config import GROUP_CHAT_ID
