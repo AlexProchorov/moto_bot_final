@@ -6,7 +6,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.exceptions import TelegramBadRequest
-
+from messages import ride_rules_message
 from config import GROUP_CHAT_ID, ADMIN_IDS
 from database.engine import get_session
 from database.models import User
@@ -261,19 +261,30 @@ async def process_ride_description(message: Message, state: FSMContext):
     location = data['location']
     admin_id = data.get('admin_id', message.from_user.id)
 
+    # 1. Создаём тему
     try:
         topic_name = f"{dt.strftime('%d.%m')} - PLAN RIDE"
         topic = await message.bot.create_forum_topic(GROUP_CHAT_ID, name=topic_name)
         thread_id = topic.message_thread_id
     except Exception as e:
         await message.answer("❌ Не удалось создать тему. Бот админ? Включены темы?")
-        logger.error(e)
+        logger.error(f"Ошибка создания темы: {e}")
         await state.clear()
         return
 
+    # 2. Отправляем правила покатушек в тему (теперь thread_id определён)
+    from messages import ride_rules_message   # если импорт не сделан вверху файла
+    await message.bot.send_message(
+        GROUP_CHAT_ID,
+        ride_rules_message(),
+        message_thread_id=thread_id,
+        parse_mode="Markdown"
+    )
+
+    # 3. Создаём заезд в БД
     ride_id = create_ride(title, dt, location, desc, admin_id, thread_id)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Участвую", callback_data=f"join_ride:{ride_id}")]])
-    announcement = f"🎉 *Новый заезд!*\n\n📅 {dt.strftime('%d.%m.%Y %H:%M')}\n📍 {location}\n📝 {desc}\n\n[Перейти в тему](https://t.me/c/{str(GROUP_CHAT_ID)[4:]}/{thread_id})"
+    announcement = f"🎉 *Новый заезд: {title}*\n\n📅 {dt.strftime('%d.%m.%Y %H:%M')}\n📍 {location}\n📝 {desc}\n\n[Перейти в тему](https://t.me/c/{str(GROUP_CHAT_ID)[4:]}/{thread_id})"
     await message.bot.send_message(GROUP_CHAT_ID, announcement, parse_mode="Markdown", reply_markup=kb)
     await state.clear()
     await message.answer(f"✅ Заезд «{title}» создан!")
@@ -304,7 +315,8 @@ async def end_ride_cmd(message: Message):
 
 
 
-# ---------- Главное меню поездок ----------
+
+
 @router.message(Command("ride_menu"))
 async def ride_menu_cmd(message: Message):
     base_buttons = [
@@ -314,16 +326,9 @@ async def ride_menu_cmd(message: Message):
         [InlineKeyboardButton(text="✅ Вступить в заезд", callback_data="ride:join_prompt")],
         [InlineKeyboardButton(text="❌ Отказаться от заезда", callback_data="ride:leave_prompt")],
     ]
-    if is_admin(message.from_user.id):
-        admin_buttons = [
-            [InlineKeyboardButton(text="[Админ] ➕ Создать плановый заезд", callback_data="ride:new")],
-            [InlineKeyboardButton(text="[Админ] 🏁 Отменить плановый заезд", callback_data="ride:end_prompt")],
-        ]
-        kb = InlineKeyboardMarkup(inline_keyboard=admin_buttons + base_buttons)
-    else:
-        kb = InlineKeyboardMarkup(inline_keyboard=base_buttons)
+    # Убираем админские кнопки полностью
+    kb = InlineKeyboardMarkup(inline_keyboard=base_buttons)
     await message.answer("🏍 *Меню поездок* – выберите действие:", reply_markup=kb, parse_mode="Markdown")
-
 @router.callback_query(F.data.startswith("ride:"))
 async def ride_menu_actions(callback: CallbackQuery, state: FSMContext):
     action = callback.data.split(":")[1]
@@ -410,3 +415,5 @@ async def join_ride_callback(callback: CallbackQuery):
             logger.error(f"Не удалось отправить сообщение в тему заезда {ride_id}: {e}")
 
     await callback.answer("Вы записаны на заезд!")
+
+

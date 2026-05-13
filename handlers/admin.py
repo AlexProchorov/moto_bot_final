@@ -1,21 +1,24 @@
 import logging
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton  # добавлено
+from aiogram.types import Message  # добавлено
 from config import ADMIN_IDS, GROUP_CHAT_ID
 from database.crud import get_all_users, get_all_birthdays_sorted, get_upcoming_birthdays
 from database.models import User
-from database.crud import get_all_users, get_all_birthdays_sorted, get_upcoming_birthdays, set_setting
+from database.crud import get_all_users
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ChatMember, ChatMemberUpdated, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ChatMember, ChatMemberUpdated, InlineKeyboardButton
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatPermissions
+from aiogram.types import Message, InlineKeyboardMarkup, CallbackQuery, ChatPermissions
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import asyncio
-from database.crud import get_all_users, get_all_birthdays_sorted, get_upcoming_birthdays, set_setting, get_users_by_district
+from database.crud import get_all_users, set_setting, get_users_by_district
 from datetime import datetime, timedelta
+from database.engine import get_session
+from database.crud import  set_setting, get_registered_users_count
+
+
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
@@ -57,16 +60,31 @@ async def participants_info(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("⛔ Только для админов.")
         return
-    users = get_all_users()
-    if not users:
-        await message.answer("📭 Пока нет зарегистрированных участников.")
-        return
+    await show_participants_panel(message)
 
-    response = "📋 Список участников:\n\n"
-    for u in users:
-        response += f"• {u['name']} (@{u['username'] or 'нет юзернейма'})\n"
-        response += f"  🏍 {u['bike']}\n"
-    await message.answer(response)   # parse_mode удалён
+async def show_participants_panel(message: Message):
+    # 1. Количество зарегистрированных в боте
+    registered_count = get_registered_users_count()   # напишем ниже
+    # 2. Общее количество участников в группе
+    try:
+        total_users = await message.bot.get_chat_member_count(GROUP_CHAT_ID)
+    except Exception as e:
+        total_users = "неизвестно"
+        logger.error(f"Ошибка получения количества участников группы: {e}")
+
+    # Клавиатура
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика по мотоциклам", callback_data="admin:stats_bikes")],
+        [InlineKeyboardButton(text="📋 Подробный список участников", callback_data="admin:detailed_list")],
+    ])
+    await message.answer(
+        f"👥 *Статистика сообщества*\n\n"
+        f"📌 Зарегистрировано в боте: `{registered_count}`\n"
+        f"📌 Всего участников в группе: `{total_users}`\n\n"
+        f"Выберите дополнительную информацию:",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
 
 @router.message(Command("bd_info"))
 async def bd_info(message: Message):
@@ -242,3 +260,134 @@ async def get_user_id_cmd(message: Message):
     await message.answer(f"ID пользователя: `{user_id}`", parse_mode="Markdown")
 
 
+
+@router.message(Command("admin_panel"))
+async def admin_panel_cmd(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Инициализировать регистрацию", callback_data="admin:init")],
+        [InlineKeyboardButton(text="📋 Список участников", callback_data="admin:participants")],
+        [InlineKeyboardButton(text="🎂 Дни рождения (все)", callback_data="admin:bd_all")],
+        [InlineKeyboardButton(text="🎂 Ближайшие ДР (30 дней)", callback_data="admin:bd_soon")],
+        [InlineKeyboardButton(text="🌦 Включить рассылку погоды", callback_data="admin:weather_on")],
+        [InlineKeyboardButton(text="🌦 Отключить рассылку погоды", callback_data="admin:weather_off")],
+        [InlineKeyboardButton(text="🔇 Замутить пользователя", callback_data="admin:mute")],
+        [InlineKeyboardButton(text="➕ Создать плановый заезд", callback_data="admin:new_ride")],
+        [InlineKeyboardButton(text="🏁 Отменить плановый заезд", callback_data="admin:end_ride")],
+    ])
+    await message.answer("🛠 *Панель администратора*\nВыберите действие:", reply_markup=kb, parse_mode="Markdown")
+
+
+@router.callback_query(F.data.startswith("admin:"))
+async def admin_callback_handler(callback: CallbackQuery):
+    await callback.answer()
+    action = callback.data.split(":")[1]
+    user_id = callback.from_user.id
+    if not is_admin(user_id):
+        await callback.message.answer("⛔ Только для админов.")
+        return
+
+    if action == "init":
+        me = await callback.bot.get_me()
+        url = f"https://t.me/{me.username}?start=register"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Зарегистрироваться", url=url)]
+        ])
+        await callback.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text=("🏍 Добро пожаловать в моточат!\n\n"
+                  "Чтобы зарегистрироваться, нажмите кнопку ниже — бот откроется в личке."),
+            reply_markup=kb,
+        )
+        await callback.message.answer("✅ Кнопка регистрации отправлена в группу.")
+        logger.info("Admin %s sent init message to group", user_id)
+
+    elif action == "participants":
+        await show_participants_panel(callback.message)
+    elif action == "stats_bikes":
+        await stats_bikes_callback(callback)
+    elif action == "detailed_list":
+        await detailed_list_callback(callback)
+
+    elif action == "bd_all":
+        birthdays = get_all_birthdays_sorted()
+        if not birthdays:
+            await callback.message.answer("📭 В базе нет данных о днях рождения.")
+            return
+        response = "🎂 Дни рождения участников:\n\n"
+        for b in birthdays:
+            response += f"• {b['name']} (@{b['username'] or 'нет юзернейма'}) — {b['birthday']}\n"
+        await callback.message.answer(response)
+
+    elif action == "bd_soon":
+        upcoming = get_upcoming_birthdays(days=30)
+        if not upcoming:
+            await callback.message.answer("🎉 Ближайших дней рождения в течение 30 дней нет.")
+            return
+        response = "🎂 Ближайшие дни рождения (в течение 30 дней):\n\n"
+        for b in upcoming:
+            response += f"• {b['name']} (@{b['username'] or 'нет юзернейма'}) — {b['birthday']} (через {b['days_left']} дн.)\n"
+        await callback.message.answer(response)
+
+    elif action == "weather_on":
+        set_setting("weather_broadcast_enabled", "true")
+        await callback.message.answer("✅ Рассылка прогноза погоды включена.")
+
+    elif action == "weather_off":
+        set_setting("weather_broadcast_enabled", "false")
+        await callback.message.answer("❌ Рассылка прогноза погоды выключена.")
+
+    elif action == "mute":
+        await callback.message.answer("Используйте команду /mute_user в ЛС.")
+
+    elif action == "new_ride":
+        await callback.message.answer(
+            "Для создания планового заезда используйте команду `/new_ride` в ЛС.\n"
+            "Бот попросит ввести название, дату, время, место и описание."
+        )
+    elif action == "end_ride":
+        await callback.message.answer(
+            "Для отмены планового заезда используйте команду `/end_ride <id_заезда>` в ЛС.\n"
+            "ID заезда можно узнать командой `/rides`."
+        )
+
+@router.callback_query(F.data == "admin:stats_bikes")
+async def stats_bikes_callback(callback: CallbackQuery):
+    await callback.answer()
+    # Группировка по марке и модели
+    from sqlalchemy import func
+    with get_session() as session:
+        bikes = session.query(User.bike_brand, User.bike_model, func.count(User.id)).filter(
+            User.bike_brand.isnot(None), User.bike_model.isnot(None)
+        ).group_by(User.bike_brand, User.bike_model).all()
+    if not bikes:
+        await callback.message.answer("📭 Данных о мотоциклах пока нет.")
+        return
+    text = "🏍 *Статистика мотоциклов:*\n\n"
+    for brand, model, count in bikes:
+        text += f"• {brand} {model} — {count} шт.\n"
+    await callback.message.answer(text, parse_mode="Markdown")
+
+@router.callback_query(F.data == "admin:detailed_list")
+async def detailed_list_callback(callback: CallbackQuery):
+    await callback.answer()
+    users = get_all_users()
+    if not users:
+        await callback.message.answer("📭 Пока нет зарегистрированных участников.")
+        return
+    response = "📋 *Список участников:*\n\n"
+    for u in users:
+        response += f"• {u['name']} (@{u['username'] or 'нет юзернейма'})\n"
+        response += f"  🏍 {u['bike']}\n"
+    # Если сообщение слишком длинное, разбиваем
+    if len(response) > 4000:
+        # можно разбить на части или отправить файлом
+        await callback.message.answer("Слишком длинный список, отправляю файлом.")
+        # альтернатива: отправить текстовым файлом
+        import io
+        file = io.BytesIO(response.encode())
+        await callback.bot.send_document(callback.from_user.id, document=file, filename="participants.txt")
+    else:
+        await callback.message.answer(response, parse_mode=None)

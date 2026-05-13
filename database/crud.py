@@ -302,8 +302,7 @@ def get_active_game(player_id: int):
             )
         ).first()
 
-def create_game(chat_id: int, thread_id: int, player_x_id: int, player_o_id: int, first_player_id: int):
-    """Создаёт новую игру и возвращает объект Game."""
+def create_game(chat_id: int, thread_id: int, player_x_id: int, player_o_id: int, first_player_id: int) -> int:
     with get_session() as session:
         game = Game(
             chat_id=chat_id,
@@ -316,7 +315,12 @@ def create_game(chat_id: int, thread_id: int, player_x_id: int, player_o_id: int
         )
         session.add(game)
         session.commit()
-        return game
+        return game.id
+        
+def is_any_game_active_or_pending():
+    with get_session() as session:
+        count = session.query(Game).filter(Game.status.in_(['active', 'waiting_deletion'])).count()
+        return count > 0
 
 def save_move(game_id: int, player_id: int, position: int, symbol: str):
     with get_session() as session:
@@ -339,22 +343,22 @@ def _update_stats(player_x_id: int, player_o_id: int, winner_id: int = None):
                 stats.games_won += 1
             session.commit()
 
-def finish_game(game_id: int, winner_id=None):
-    """Завершает игру, обновляет статус и статистику."""
-    from datetime import datetime
+def finish_game(game_id: int, winner: int = None, bot=None, chat_id=None, thread_id=None):
     with get_session() as session:
         game = session.query(Game).filter(Game.id == game_id).first()
-        if not game:
+        if not game or game.status != 'active':
             return
-        if game.status == 'finished':
-            return
-        game.status = 'finished'
+        # Обновляем победителя
+        if winner:
+            game.winner_id = winner
+        game.status = 'waiting_deletion'   # новая стадия
         game.finished_at = datetime.now()
-        if winner_id:
-            game.winner_id = winner_id
         session.commit()
         # Обновляем статистику
-        _update_stats(game.player_x_id, game.player_o_id, winner_id)
+        _update_stats(game.player_x_id, game.player_o_id, winner)
+        # Запускаем отложенное удаление темы
+        if bot and chat_id and thread_id:
+            schedule_game_cleanup(game_id, chat_id, thread_id, bot)
         return game
 
 def _update_stats(player_x_id: int, player_o_id: int, winner_id: int = None):
@@ -417,3 +421,87 @@ def auto_abandon_stale_game(player_id: int):
         finish_game(game.id, winner=None)
         return True
     return False
+
+def update_user_rules_accepted(telegram_id: int, accepted: bool):
+    with get_session() as session:
+        user = session.query(User).filter(User.telegram_id == telegram_id).first()
+        if user:
+            user.rules_accepted = accepted
+            session.commit()
+
+def get_user_by_telegram_id(telegram_id: int):
+    with get_session() as session:
+        return session.query(User).filter(User.telegram_id == telegram_id).first()
+
+
+def get_user_bike_details(telegram_id: int):
+    """Возвращает кортеж (bike_brand, bike_model) для пользователя."""
+    with get_session() as session:
+        user_row = session.query(User.bike_brand, User.bike_model).filter(User.telegram_id == telegram_id).first()
+        if user_row:
+            return user_row.bike_brand, user_row.bike_model
+        return None, None
+
+def get_stale_game_by_timeout(timeout_minutes=5):
+    """Возвращает активную игру, где последний ход был сделан более timeout_minutes назад."""
+    with get_session() as session:
+        threshold = datetime.now() - timedelta(minutes=timeout_minutes)
+        return session.query(Game).filter(
+            Game.status == 'active',
+            Game.last_move_at <= threshold
+        ).first()
+
+def finish_game_timeout(game_id: int):
+    """Завершает игру по таймауту: победитель – тот, кто ходил последний."""
+    with get_session() as session:
+        game = session.query(Game).filter(Game.id == game_id).first()
+        if not game or game.status != 'active':
+            return
+        # Если ходов не было – ничья
+        if game.turn_id is None or game.last_move_at is None:
+            finish_game(game_id, winner=None)
+        else:
+            # Победитель – последний ходивший игрок
+            finish_game(game_id, winner=game.turn_id)
+
+def reset_all_active_games():
+    """Завершает все активные игры (ставит статус finished и проставляет время окончания)."""
+    with get_session() as session:
+        session.query(Game).filter(Game.status == 'active').update(
+            {'status': 'finished', 'finished_at': datetime.now()}
+        )
+        session.commit()
+
+import asyncio
+
+def schedule_game_cleanup(game_id: int, chat_id: int, thread_id: int, bot):
+    """Запускает отложенное удаление темы через 60 секунд."""
+    async def delete_later():
+        await asyncio.sleep(60)
+        try:
+            await bot.delete_forum_topic(chat_id, thread_id)
+            logger.info(f"Deleted forum topic {thread_id} for game {game_id}")
+        except Exception as e:
+            logger.error(f"Failed to delete topic {thread_id}: {e}")
+        # После удаления темы окончательно завершаем игру (меняем статус на finished, если ещё не завершена)
+        finalize_game(game_id)
+    asyncio.create_task(delete_later())
+
+def finalize_game(game_id: int):
+    with get_session() as session:
+        game = session.query(Game).filter(Game.id == game_id).first()
+        if game and game.status == 'waiting_deletion':
+            game.status = 'finished'
+            session.commit()
+
+
+def update_user_weather_notifications(telegram_id: int, enabled: bool):
+    with get_session() as session:
+        user = session.query(User).filter(User.telegram_id == telegram_id).first()
+        if user:
+            user.weather_notifications = enabled
+            session.commit()
+
+def get_registered_users_count():
+    with get_session() as session:
+        return session.query(User).count()

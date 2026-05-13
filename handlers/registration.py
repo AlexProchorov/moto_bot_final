@@ -3,6 +3,8 @@ import logging
 import re
 from pathlib import Path
 from typing import Optional
+from keyboards.inline import get_rules_keyboard
+from messages import rules_message
 
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
@@ -55,7 +57,7 @@ def get_user(tg_id: int) -> Optional[User]:
     with get_session() as s:
         return s.query(User).filter(User.telegram_id == tg_id).first()
 
-def upsert_user(tg_id: int, username: Optional[str], name: str, birthday: str, brand: str, model: str, district: Optional[str] = None):
+def upsert_user(tg_id: int, username: Optional[str], name: str, birthday: str, brand: str, model: str, district: Optional[str] = None, rules_accepted: bool = False):
     with get_session() as s:
         u = s.query(User).filter(User.telegram_id == tg_id).first()
         if u:
@@ -66,6 +68,7 @@ def upsert_user(tg_id: int, username: Optional[str], name: str, birthday: str, b
             u.bike_model = model
             if district is not None:
                 u.district = district
+            u.rules_accepted = rules_accepted
         else:
             s.add(User(
                 telegram_id=tg_id,
@@ -75,6 +78,7 @@ def upsert_user(tg_id: int, username: Optional[str], name: str, birthday: str, b
                 bike_brand=brand,
                 bike_model=model,
                 district=district,
+                rules_accepted=rules_accepted
             ))
 
 # ---------- Клавиатуры ----------
@@ -214,7 +218,7 @@ async def district_step(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     district = callback.data.split(":", 1)[1]
     data = await state.get_data()
-    # Сохраняем все данные, включая округ
+    # Сохраняем пользователя, но правила ещё не приняты
     upsert_user(
         tg_id=callback.from_user.id,
         username=callback.from_user.username,
@@ -222,25 +226,14 @@ async def district_step(callback: CallbackQuery, state: FSMContext):
         birthday=data["birthday"],
         brand=data["brand"],
         model=data["model"],
-        district=district
+        district=district,
+        rules_accepted=False
     )
     await state.clear()
-    await callback.message.answer(
-        f"✅ Готово! Вы зарегистрированы.\n\n"
-        f"Имя: {data['name']}\n"
-        f"ДР: {data['birthday']}\n"
-        f"Мото: {data['brand']} {data['model']}\n"
-        f"Округ: {district}"
-    )
-    # Отправка уведомления в группу (опционально)
-    if GROUP_CHAT_ID:
-        try:
-            await callback.bot.send_message(
-                GROUP_CHAT_ID,
-                f"👋 Новый участник: {data['name']} — {data['brand']} {data['model']}"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to notify group: {e}")
+    # Отправляем правила с кнопками
+    await callback.message.answer(rules_message(), parse_mode="Markdown", reply_markup=get_rules_keyboard())
+
+
 
 
 

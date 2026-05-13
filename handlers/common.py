@@ -1,4 +1,4 @@
-from aiogram import Router, F
+
 from aiogram.filters import Command
 from aiogram.types import Message
 from database.engine import get_session
@@ -6,7 +6,16 @@ from database.models import User
 from utils.districts import DISTRICT_COORDS
 from database.crud import get_users_by_district
 from utils.weather import get_current_weather, get_weather_by_coords, get_weather_cached, clothing_recommendation
-
+from database.crud import update_user_rules_accepted, delete_user_by_id, get_user_by_telegram_id
+from config import GROUP_CHAT_ID
+from aiogram.types import CallbackQuery
+from aiogram import Router, F, Bot
+from aiogram.types import Message, CallbackQuery
+from messages import welcome_with_rules
+import asyncio
+from database.crud import get_user_bike_details
+from database.crud import update_user_weather_notifications
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 router = Router()
 
@@ -95,3 +104,126 @@ async def neighbors_cmd(message: Message):
             lines.append(f"• {name}")
     text = f"🏘 <b>В вашем округе {district} проживает {len(neighbors)} участник(а):</b>\n\n" + "\n".join(lines)
     await message.answer(text, parse_mode="HTML")
+
+from database.crud import update_user_rules_accepted, delete_user_by_id, get_user_by_telegram_id
+from config import GROUP_CHAT_ID
+
+@router.callback_query(F.data == "rules_accept")
+async def rules_accept(callback: CallbackQuery, bot: Bot):
+    user_id = callback.from_user.id
+    update_user_rules_accepted(user_id, True)
+    await callback.answer("✅ Спасибо! Добро пожаловать в сообщество!")
+    await callback.message.delete()
+    
+    # Получаем данные о мотоцикле (синхронно)
+    bike_brand, bike_model = get_user_bike_details(user_id)
+    bike_text = ""
+    if bike_brand and bike_model:
+        bike_text = f"\n🏍 У тебя классный мопед: {bike_brand} {bike_model}"
+    
+    await callback.message.answer(
+        "🎉 Поздравляем с вступлением в наше мотосообщество!\n"
+        "Будь на связи, участвуй в покатушках и получай удовольствие! 🏍️"
+    )
+    
+    if GROUP_CHAT_ID:
+        try:
+            user = await bot.get_chat(user_id)
+            name = user.first_name or "Участник"
+            username = user.username
+            if username:
+                mention = f"@{username}"
+            else:
+                mention = f'<a href="tg://user?id={user_id}">{name}</a>'
+            await bot.send_message(
+                GROUP_CHAT_ID,
+                f"👋 Привет, {mention}! Рады видеть тебя с нами. Добро пожаловать в команду!{bike_text} 🏍️",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить приветствие в группу: {e}")
+@router.callback_query(F.data == "rules_decline")
+async def rules_decline(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    # Удаляем профиль пользователя
+    delete_user_by_id(user_id)
+    await callback.answer("❌ Вы не согласились с правилами.")
+    await callback.message.edit_text(
+        "Извини, но без согласия с правилами ты не сможешь быть полноценным участником нашей команды.\n"
+        "Если передумаешь – зарегистрируйся заново."
+    )
+
+@router.message(Command("rules"))
+async def cmd_rules(message: Message):
+    # Проверяем, зарегистрирован ли пользователь и принял ли правила
+    user = get_user_by_telegram_id(message.from_user.id)
+    if not user or not user.rules_accepted:
+        await message.answer("❌ Вы не зарегистрированы или не приняли правила. Используйте /start для регистрации.")
+        return
+    await message.answer(rules_message(), parse_mode="Markdown", reply_markup=get_rules_keyboard())
+
+
+@router.message(Command("weather_settings"))
+async def weather_settings_cmd(message: Message):
+    user_id = message.from_user.id
+    with get_session() as session:
+        user = session.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            await message.answer("❌ Вы не зарегистрированы.")
+            return
+        current = user.weather_notifications
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔕 Выключить уведомления" if current else "🔔 Включить уведомления",
+            callback_data="weather_toggle"
+        )]
+    ])
+    status = "включены" if current else "выключены"
+    await message.answer(f"🌦 Уведомления о погоде {status}. Нажмите кнопку, чтобы изменить:", reply_markup=kb)
+
+@router.callback_query(F.data == "weather_toggle")
+async def weather_toggle_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    with get_session() as session:
+        user = session.query(User).filter(User.telegram_id == user_id).first()
+        if user:
+            user.weather_notifications = not user.weather_notifications
+            session.commit()
+            new_status = "включены" if user.weather_notifications else "выключены"
+            await callback.message.edit_text(f"✅ Уведомления о погоде {new_status}.")
+        else:
+            await callback.message.edit_text("❌ Пользователь не найден.")
+    await callback.answer()
+
+
+@router.message(Command("weather_settings"))
+async def weather_settings_cmd(message: Message):
+    user_id = message.from_user.id
+    with get_session() as session:
+        user = session.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            await message.answer("❌ Вы не зарегистрированы.")
+            return
+        current = user.weather_notifications
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔕 Выключить уведомления" if current else "🔔 Включить уведомления",
+            callback_data="weather_toggle"
+        )]
+    ])
+    status = "включены" if current else "выключены"
+    await message.answer(f"🌦 Уведомления о погоде: {status}.\nНажмите кнопку, чтобы изменить:", reply_markup=kb)
+
+@router.callback_query(F.data == "weather_toggle")
+async def weather_toggle_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    with get_session() as session:
+        user = session.query(User).filter(User.telegram_id == user_id).first()
+        if user:
+            user.weather_notifications = not user.weather_notifications
+            session.commit()
+            new_status = "включены" if user.weather_notifications else "выключены"
+            await callback.message.edit_text(f"✅ Уведомления о погоде {new_status}.")
+        else:
+            await callback.message.edit_text("❌ Пользователь не найден.")
+    await callback.answer()

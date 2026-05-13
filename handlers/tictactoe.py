@@ -10,10 +10,10 @@ from aiogram.fsm.state import State, StatesGroup
 from config import GROUP_CHAT_ID, ADMIN_IDS
 from database.crud import (
     user_exists, get_active_game, create_game, save_move, finish_game,
-    get_player_stats, auto_abandon_stale_game
+    get_player_stats, auto_abandon_stale_game, reset_all_active_games
 )
 from database.engine import get_session
-from database.models import User
+from database.models import User, Game
 
 logger = logging.getLogger(__name__)
 router = Router(name="tictactoe")
@@ -21,100 +21,13 @@ router = Router(name="tictactoe")
 class ChallengeStates(StatesGroup):
     waiting_challenge = State()
 
-# Временное хранилище вызовов
 challenges = {}
 
-# ---------- Команда вызова ----------
-@router.message(Command("tictactoe"))
-async def tictactoe_cmd(message: Message, state: FSMContext):
-    if message.chat.type != "private":
-        await message.answer("❌ Игра доступна только в личных сообщениях с ботом.")
-        return
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.answer("❌ Используйте: `/tictactoe @username` или `/tictactoe <user_id>`", parse_mode="Markdown")
-        return
-    target = args[1].strip()
-    # Определяем ID противника
-    if target.startswith('@'):
-        username = target[1:]
-        with get_session() as session:
-            user = session.query(User).filter(User.username == username).first()
-            if not user:
-                await message.answer(f"❌ Пользователь @{username} не зарегистрирован в боте.")
-                return
-            opponent_id = user.telegram_id
-    else:
-        if not target.isdigit():
-            await message.answer("❌ Введите корректный ID или @username.")
-            return
-        opponent_id = int(target)
-        if not user_exists(opponent_id):
-            await message.answer(f"❌ Пользователь с ID {opponent_id} не зарегистрирован.")
-            return
+# ---------- Вспомогательные функции ----------
+def is_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS
 
-    challenger_id = message.from_user.id
-    if challenger_id == opponent_id:
-        await message.answer("❌ Нельзя играть с самим собой.")
-        return
-
-    # Проверка на активные или зависшие игры
-    if get_active_game(challenger_id) or get_active_game(opponent_id):
-        # Если есть зависшая игра у вызывающего – завершаем
-        if auto_abandon_stale_game(challenger_id):
-            await message.answer("⚠️ Ваша предыдущая игра была зависшей и завершена. Теперь можно создать новую.")
-        elif auto_abandon_stale_game(opponent_id):
-            await message.answer("⚠️ У противника была зависшая игра. Она завершена. Повторите вызов.")
-        else:
-            await message.answer("❌ Один из игроков уже участвует в активной игре. Завершите её сначала (можно через /ttt_abandon).")
-        return
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Принять вызов", callback_data=f"ttt_accept:{challenger_id}")],
-        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"ttt_decline:{challenger_id}")]
-    ])
-    challenger_name = message.from_user.first_name
-    try:
-        await message.bot.send_message(opponent_id, f"🎮 Игрок {challenger_name} вызывает вас на партию в крестики-нолики!", reply_markup=kb)
-        await message.answer("✅ Вызов отправлен. Ожидайте ответа.")
-        challenges[challenger_id] = {"opponent_id": opponent_id, "timestamp": datetime.now()}
-    except Exception as e:
-        logger.error(f"Не удалось отправить вызов: {e}")
-        await message.answer("❌ Не удалось отправить вызов. Возможно, пользователь не начал диалог с ботом.")
-
-# ---------- Принятие/отклонение вызова ----------
-@router.callback_query(F.data.startswith("ttt_accept:"))
-async def accept_challenge(callback: CallbackQuery, bot: Bot):
-    await callback.answer()
-    challenger_id = int(callback.data.split(":")[1])
-    opponent_id = callback.from_user.id
-    if get_active_game(challenger_id) or get_active_game(opponent_id):
-        await callback.message.edit_text("❌ Один из игроков уже в игре. Невозможно начать.")
-        return
-    try:
-        topic_name = f"🎮 Крестики-нолики: {callback.from_user.first_name} vs {callback.message.from_user.first_name}"
-        topic = await bot.create_forum_topic(GROUP_CHAT_ID, name=topic_name)
-        thread_id = topic.message_thread_id
-    except Exception as e:
-        logger.error(f"Не удалось создать тему: {e}")
-        await callback.message.edit_text("❌ Не удалось создать игровую тему. Бот должен быть администратором группы и включены темы.")
-        return
-    first = random.choice([challenger_id, opponent_id])
-    game = create_game(GROUP_CHAT_ID, thread_id, challenger_id, opponent_id, first)
-    await send_game_board(bot, game.id)
-    await bot.send_message(challenger_id, f"🎮 Игра началась! Ваш ход {'первым' if challenger_id == first else 'вторым'}. Следите за игровой темой.")
-    await bot.send_message(opponent_id, f"🎮 Игра началась! Ваш ход {'первым' if opponent_id == first else 'вторым'}. Следите за игровой темой.")
-    await callback.message.edit_text("✅ Вы приняли вызов! Игра началась.")
-
-@router.callback_query(F.data.startswith("ttt_decline:"))
-async def decline_challenge(callback: CallbackQuery):
-    await callback.answer()
-    challenger_id = int(callback.data.split(":")[1])
-    await callback.message.edit_text("❌ Вы отклонили вызов.")
-    await callback.bot.send_message(challenger_id, "❌ Противник отклонил вызов.")
-
-# ---------- Отправка/обновление игрового поля ----------
-async def send_game_board(bot: Bot, game_id: int):
+async def send_game_board_to_players(bot: Bot, game_id: int):
     with get_session() as session:
         game = session.query(Game).filter(Game.id == game_id).first()
         if not game:
@@ -151,11 +64,13 @@ async def send_game_board(bot: Bot, game_id: int):
         keyboard.append([InlineKeyboardButton(text="🏳️ Сдаться", callback_data=f"ttt_surrender:{game_id}")])
         keyboard.append([InlineKeyboardButton(text="🚪 Завершить игру", callback_data=f"ttt_end:{game_id}")])
         reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+        # Обновляем сообщение в теме группы
         if game.message_id:
             try:
                 await bot.edit_message_text(text, chat_id=game.chat_id, message_id=game.message_id,
                                             parse_mode="Markdown", reply_markup=reply_markup)
-            except Exception:
+            except:
                 msg = await bot.send_message(game.chat_id, text, parse_mode="Markdown",
                                              reply_markup=reply_markup, message_thread_id=game.thread_id)
                 game.message_id = msg.message_id
@@ -165,6 +80,166 @@ async def send_game_board(bot: Bot, game_id: int):
                                          reply_markup=reply_markup, message_thread_id=game.thread_id)
             game.message_id = msg.message_id
             session.commit()
+
+        # Отправляем/обновляем в ЛС игроков
+        for pid, side in [(player_x_id, 'X'), (player_o_id, 'O')]:
+            player_text = f"Ваш символ: {'❌' if side == 'X' else '⭕'}\n\n" + text
+            msg_id_field = 'player_x_message_id' if pid == player_x_id else 'player_o_message_id'
+            current_msg_id = getattr(game, msg_id_field)
+            if current_msg_id:
+                try:
+                    await bot.edit_message_text(player_text, chat_id=pid, message_id=current_msg_id,
+                                                parse_mode="Markdown", reply_markup=reply_markup)
+                except:
+                    msg = await bot.send_message(pid, player_text, parse_mode="Markdown", reply_markup=reply_markup)
+                    setattr(game, msg_id_field, msg.message_id)
+                    session.commit()
+            else:
+                msg = await bot.send_message(pid, player_text, parse_mode="Markdown", reply_markup=reply_markup)
+                setattr(game, msg_id_field, msg.message_id)
+                session.commit()
+
+def check_winner(board_str):
+    board = list(board_str)
+    win_patterns = [
+        [0,1,2],[3,4,5],[6,7,8],
+        [0,3,6],[1,4,7],[2,5,8],
+        [0,4,8],[2,4,6]
+    ]
+    for p in win_patterns:
+        if board[p[0]] != ' ' and board[p[0]] == board[p[1]] == board[p[2]]:
+            return board[p[0]]
+    return None
+
+async def finish_game_ui(bot: Bot, game_id: int, winner: Optional[int]):
+    with get_session() as session:
+        game = session.query(Game).filter(Game.id == game_id).first()
+        if not game:
+            return
+        if winner:
+            user = session.query(User).filter(User.telegram_id == winner).first()
+            winner_name = user.name if user else str(winner)
+            result_text = f"🏆 Победитель: {winner_name}! Поздравляем! 🎉"
+        else:
+            result_text = "🤝 Ничья!"
+        try:
+            await bot.edit_message_text(result_text, chat_id=game.chat_id, message_id=game.message_id, parse_mode="Markdown")
+        except:
+            pass
+        # Закрываем тему (но не удаляем сразу)
+        try:
+            await bot.close_forum_topic(game.chat_id, game.thread_id)
+        except:
+            pass
+        # Планируем удаление темы через 60 секунд
+        async def delete_topic_later():
+            await asyncio.sleep(60)
+            try:
+                await bot.delete_forum_topic(game.chat_id, game.thread_id)
+                logger.info(f"Тема игры {game_id} удалена")
+            except Exception as e:
+                logger.error(f"Ошибка удаления темы: {e}")
+        asyncio.create_task(delete_topic_later())
+        # Удаляем сообщения в ЛС (опционально)
+        for pid in [game.player_x_id, game.player_o_id]:
+            await bot.send_message(pid, result_text, parse_mode="Markdown")
+
+# ---------- Команда вызова ----------
+@router.message(Command("tictactoe"))
+async def tictactoe_cmd(message: Message, state: FSMContext):
+    if message.chat.type != "private":
+        await message.answer("❌ Игра доступна только в личных сообщениях с ботом.")
+        return
+
+    # Проверяем глобальную активную игру
+    with get_session() as session:
+        active_game = session.query(Game).filter(Game.status == 'active').first()
+        if active_game:
+            await message.answer("❌ Сейчас уже идёт другая игра. Дождитесь её окончания.")
+            return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("❌ Используйте: `/tictactoe @username` или `/tictactoe <user_id>`", parse_mode="Markdown")
+        return
+    target = args[1].strip()
+    if target.startswith('@'):
+        username = target[1:]
+        with get_session() as session:
+            user = session.query(User).filter(User.username == username).first()
+            if not user:
+                await message.answer(f"❌ Пользователь @{username} не зарегистрирован в боте.")
+                return
+            opponent_id = user.telegram_id
+    else:
+        if not target.isdigit():
+            await message.answer("❌ Введите корректный ID или @username.")
+            return
+        opponent_id = int(target)
+        if not user_exists(opponent_id):
+            await message.answer(f"❌ Пользователь с ID {opponent_id} не зарегистрирован.")
+            return
+
+    challenger_id = message.from_user.id
+    if challenger_id == opponent_id:
+        await message.answer("❌ Нельзя играть с самим собой.")
+        return
+
+    if get_active_game(challenger_id) or get_active_game(opponent_id):
+        await message.answer("❌ Один из игроков уже участвует в активной игре.")
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Принять вызов", callback_data=f"ttt_accept:{challenger_id}")],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"ttt_decline:{challenger_id}")]
+    ])
+    challenger_name = message.from_user.first_name
+    try:
+        await message.bot.send_message(opponent_id, f"🎮 Игрок {challenger_name} вызывает вас на партию в крестики-нолики!", reply_markup=kb)
+        await message.answer("✅ Вызов отправлен. Ожидайте ответа.")
+        challenges[challenger_id] = {"opponent_id": opponent_id, "timestamp": datetime.now()}
+    except Exception as e:
+        logger.error(f"Не удалось отправить вызов: {e}")
+        await message.answer("❌ Не удалось отправить вызов. Возможно, пользователь не начал диалог с ботом.")
+
+# ---------- Принятие/отклонение вызова ----------
+@router.callback_query(F.data.startswith("ttt_accept:"))
+async def accept_challenge(callback: CallbackQuery, bot: Bot):
+    if is_any_game_active_or_pending():
+        await callback.message.edit_text("❌ Сейчас уже идёт другая игра (или идёт очистка). Подождите минуту.")
+        return
+    await callback.answer()
+    challenger_id = int(callback.data.split(":")[1])
+    opponent_id = callback.from_user.id
+
+    with get_session() as session:
+        active_game = session.query(Game).filter(Game.status == 'active').first()
+        if active_game:
+            await callback.message.edit_text("❌ Сейчас уже идёт другая игра. Невозможно начать.")
+            return
+
+    try:
+        topic_name = f"🎮 Крестики-нолики: {callback.from_user.first_name} vs {callback.message.from_user.first_name}"
+        topic = await bot.create_forum_topic(GROUP_CHAT_ID, name=topic_name)
+        thread_id = topic.message_thread_id
+    except Exception as e:
+        logger.error(f"Не удалось создать тему: {e}")
+        await callback.message.edit_text("❌ Не удалось создать игровую тему. Бот должен быть администратором группы и включены темы.")
+        return
+
+    first = random.choice([challenger_id, opponent_id])
+    game_id = create_game(GROUP_CHAT_ID, thread_id, challenger_id, opponent_id, first)
+    await send_game_board_to_players(bot, game_id)
+    await bot.send_message(challenger_id, f"🎮 Игра началась! Ваш ход {'первым' if challenger_id == first else 'вторым'}.")
+    await bot.send_message(opponent_id, f"🎮 Игра началась! Ваш ход {'первым' if opponent_id == first else 'вторым'}.")
+    await callback.message.edit_text("✅ Вы приняли вызов! Игра началась.")
+
+@router.callback_query(F.data.startswith("ttt_decline:"))
+async def decline_challenge(callback: CallbackQuery):
+    await callback.answer()
+    challenger_id = int(callback.data.split(":")[1])
+    await callback.message.edit_text("❌ Вы отклонили вызов.")
+    await callback.bot.send_message(challenger_id, "❌ Противник отклонил вызов.")
 
 # ---------- Обработка хода ----------
 @router.callback_query(F.data.startswith("ttt_move:"))
@@ -199,51 +274,20 @@ async def make_move(callback: CallbackQuery, bot: Bot):
 
         winner = check_winner(new_board)
         if winner:
-            finish_game(game_id, winner=user_id)
+            # В make_move при победе/ничьей:
+            finish_game(game_id, winner=user_id, bot=bot, chat_id=game.chat_id, thread_id=game.thread_id)
             await finish_game_ui(bot, game_id, winner=user_id)
             return
         if all(c != ' ' for c in new_board):
             finish_game(game_id, winner=None)
             await finish_game_ui(bot, game_id, winner=None)
             return
+
         other_id = game.player_x_id if user_id == game.player_o_id else game.player_o_id
         game.turn_id = other_id
         game.board = new_board
         session.commit()
-        await send_game_board(bot, game_id)
-
-def check_winner(board_str):
-    board = list(board_str)
-    win_patterns = [
-        [0,1,2],[3,4,5],[6,7,8],
-        [0,3,6],[1,4,7],[2,5,8],
-        [0,4,8],[2,4,6]
-    ]
-    for p in win_patterns:
-        if board[p[0]] != ' ' and board[p[0]] == board[p[1]] == board[p[2]]:
-            return board[p[0]]
-    return None
-
-# ---------- Завершение игры (UI) ----------
-async def finish_game_ui(bot: Bot, game_id: int, winner: Optional[int]):
-    with get_session() as session:
-        game = session.query(Game).filter(Game.id == game_id).first()
-        if not game:
-            return
-        if winner:
-            user = session.query(User).filter(User.telegram_id == winner).first()
-            winner_name = user.name if user else str(winner)
-            result_text = f"🏆 Победитель: {winner_name}! Поздравляем! 🎉"
-        else:
-            result_text = "🤝 Ничья!"
-        try:
-            await bot.edit_message_text(result_text, chat_id=game.chat_id, message_id=game.message_id, parse_mode="Markdown")
-        except Exception:
-            pass
-        try:
-            await bot.close_forum_topic(game.chat_id, game.thread_id)
-        except Exception as e:
-            logger.error(f"Не удалось закрыть тему: {e}")
+        await send_game_board_to_players(bot, game_id)
 
 # ---------- Сдаться через кнопку ----------
 @router.callback_query(F.data.startswith("ttt_surrender:"))
@@ -260,7 +304,8 @@ async def surrender(callback: CallbackQuery, bot: Bot):
             await callback.answer("Вы не участвуете в этой игре.", show_alert=True)
             return
         winner = game.player_x_id if user_id == game.player_o_id else game.player_o_id
-        finish_game(game_id, winner=winner)
+        # В make_move при победе/ничьей:
+        finish_game(game_id, winner=user_id, bot=bot, chat_id=game.chat_id, thread_id=game.thread_id)
         await finish_game_ui(bot, game_id, winner=winner)
 
 # ---------- Принудительное завершение (кнопка) ----------
@@ -278,18 +323,13 @@ async def end_game(callback: CallbackQuery, bot: Bot):
             await callback.answer("Только участники или админ могут завершить игру.", show_alert=True)
             return
         finish_game(game_id, winner=None)
-        # Принудительно обновляем сессию, чтобы убедиться
-        with get_session() as session2:
-           game2 = session2.query(Game).filter(Game.id == game_id).first()
-           logger.info(f"Game status after finish: {game2.status}")
-
         await finish_game_ui(bot, game_id, winner=None)
 
+# ---------- Служебные команды ----------
 @router.callback_query(F.data == "ttt_noop")
 async def noop(callback: CallbackQuery):
     await callback.answer("Это занятая клетка или служебная кнопка.")
 
-# ---------- Статистика ----------
 @router.message(Command("stats"))
 async def stats_cmd(message: Message):
     user_id = message.from_user.id
@@ -305,7 +345,6 @@ async def stats_cmd(message: Message):
     )
     await message.answer(text, parse_mode="Markdown")
 
-# ---------- Статус активной игры ----------
 @router.message(Command("ttt_status"))
 async def ttt_status(message: Message):
     user_id = message.from_user.id
@@ -324,11 +363,10 @@ async def ttt_status(message: Message):
             f"Ваш ход: {'да' if game.turn_id == user_id else 'нет'}\n"
             f"Игра начата: {game.created_at.strftime('%d.%m.%Y %H:%M')}\n"
             f"Последний ход: {game.last_move_at.strftime('%d.%m.%Y %H:%M') if game.last_move_at else 'неизвестно'}\n\n"
-            f"Чтобы продолжить, откройте игровую тему в группе и сделайте ход."
+            f"Чтобы продолжить, сделайте ход в личных сообщениях с ботом (используйте кнопки)."
         )
         await message.answer(text)
 
-# ---------- Принудительный выход из зависшей игры (через команду) ----------
 @router.message(Command("ttt_abandon"))
 async def abandon_game(message: Message):
     user_id = message.from_user.id
@@ -371,7 +409,6 @@ async def abandon_cancel(callback: CallbackQuery):
     await callback.answer()
     await callback.message.edit_text("❌ Отмена. Игра продолжается.")
 
-# ---------- Админская команда принудительного завершения ----------
 @router.message(Command("ttt_force_end"))
 async def force_end_game(message: Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -382,5 +419,48 @@ async def force_end_game(message: Message):
         await message.answer("❌ Используйте: `/ttt_force_end <game_id>`", parse_mode="Markdown")
         return
     game_id = int(args[1])
-    finish_game(game_id, winner=None)
+    finish_game(game_id, winner=user_id, bot=bot, chat_id=game.chat_id, thread_id=game.thread_id)
     await message.answer(f"✅ Игра #{game_id} принудительно завершена (ничья).")
+
+# ---------- Меню игр ----------
+@router.message(Command("games"))
+async def games_menu(message: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎮 Крестики-нолики", callback_data="games:play")],
+        [InlineKeyboardButton(text="📊 Моя статистика", callback_data="games:stats")],
+    ])
+    if is_admin(message.from_user.id):
+        kb.inline_keyboard.append(
+            [InlineKeyboardButton(text="⚠️ Сбросить все активные игры", callback_data="games:reset")]
+        )
+    await message.answer("🎲 *Игровой центр*\nВыберите действие:", reply_markup=kb, parse_mode="Markdown")
+
+@router.callback_query(F.data == "games:play")
+async def games_play_callback(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.answer("Введите @username или ID соперника для игры в крестики-нолики.\nПример: `/tictactoe @username`", parse_mode="Markdown")
+
+@router.callback_query(F.data == "games:stats")
+async def games_stats_callback(callback: CallbackQuery):
+    await callback.answer()
+    user_id = callback.from_user.id
+    stats = get_player_stats(user_id)
+    with get_session() as session:
+        user = session.query(User).filter(User.telegram_id == user_id).first()
+        name = user.name if user else "Вы"
+    text = (
+        f"📊 *Статистика игрока {name}*\n"
+        f"🎮 Сыграно игр: {stats['games_played']}\n"
+        f"🏆 Побед: {stats['games_won']}\n"
+        f"🤝 Ничьих: {stats['games_drawn']}"
+    )
+    await callback.message.answer(text, parse_mode="Markdown")
+
+@router.callback_query(F.data == "games:reset")
+async def games_reset_callback(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Только для админов!", show_alert=True)
+        return
+    await callback.answer()
+    reset_all_active_games()
+    await callback.message.answer("✅ Все активные игры принудительно завершены. Теперь можно создавать новые.")

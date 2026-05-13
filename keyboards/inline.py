@@ -60,3 +60,9 @@ def get_districts_keyboard():
     keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back")])
     keyboard.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_rules_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Согласен", callback_data="rules_accept")],
+        [InlineKeyboardButton(text="❌ Не согласен", callback_data="rules_decline")]
+    ])

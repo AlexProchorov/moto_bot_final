@@ -1,16 +1,18 @@
 import asyncio
 import logging
-from datetime import timedelta
-from database.crud import auto_finish_stale_games
+from datetime import datetime, timedelta
+from database.crud import get_stale_game_by_timeout, finish_game_timeout
 
 logger = logging.getLogger(__name__)
 
-async def stale_games_cleaner():
-    """Фоновая задача: каждые 6 часов завершает игры без хода более 7 дней."""
+async def check_timeout_games():
+    """Фоновая задача: проверяет каждые 30 секунд игры с таймаутом хода 5 минут."""
     while True:
         try:
-            auto_finish_stale_games(timeout_hours=168)  # 7 дней
-            logger.info("Checked for stale games")
+            game = get_stale_game_by_timeout(timeout_minutes=5)
+            if game:
+                finish_game_timeout(game.id)
+                logger.info(f"Game {game.id} finished due to timeout")
         except Exception as e:
-            logger.error(f"Error in stale games cleaner: {e}")
-        await asyncio.sleep(21600)  # 6 часов
+            logger.error(f"Error in timeout checker: {e}")
+        await asyncio.sleep(30)

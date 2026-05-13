@@ -14,6 +14,8 @@ from utils.ride_scheduler import check_expired_active_users, check_expired_rides
 from middleware.admin_check import AdminCheckMiddleware
 from handlers import tictactoe 
 from aiohttp import ClientSession
+from utils.game_scheduler import check_timeout_games
+
 
 from aiohttp_socks import ProxyConnector
 from aiogram import Bot
@@ -27,23 +29,18 @@ async def set_commands(bot: Bot):
         BotCommand(command="my_profile", description="Моя анкета"),
         BotCommand(command="edit_my_profile", description="Редактировать анкету"),
         BotCommand(command="delete_my_profile", description="Удалить анкету"),
+        BotCommand(command="neighbors", description="Мои соседи"),
         BotCommand(command="weather_now", description="Погода сейчас"),
-        BotCommand(command="ride_menu", description="🏍 Меню покатушек"),
-        BotCommand(command="neighbors", description="Кто живёт в моём округе"),
-        BotCommand(command="tictactoe", description="🎮 Сыграть в крестики-нолики"),
-        BotCommand(command="stats", description="📊 Моя статистика в играх"),
+        BotCommand(command="ride_menu", description="🏍 Меню заездов"),
+        BotCommand(command="games", description="🎲 Меню игр"),
+
+        BotCommand(command="weather_settings", description="🌦 Вкл/выкл погоду"),
+
     ]
     await bot.set_my_commands(common_commands, scope=BotCommandScopeAllPrivateChats())
 
     admin_commands = [
-        BotCommand(command="init", description="[Админ] Инициализировать регистрацию"),
-        BotCommand(command="participants_info", description="[Админ] Список участников"),
-        BotCommand(command="bd_info", description="[Админ] Дни рождения"),
-        BotCommand(command="bd_info_soon", description="[Админ] Ближайшие ДР"),
-        BotCommand(command="weather_on", description="[Админ] Вкл рассылку погоды"),
-        BotCommand(command="weather_off", description="[Админ] Выкл рассылку погоды"),
-        BotCommand(command="mute_user", description="[Админ] Запретить писать в чате"),
-        BotCommand(command="get_user_id", description="[Админ] Получить ID пользователя"),
+        BotCommand(command="admin_panel", description="🏍Меню админа"),
     ]
     for admin_id in ADMIN_IDS:
         await bot.set_my_commands(common_commands + admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
@@ -80,6 +77,8 @@ async def main():
     asyncio.create_task(check_expired_active_users(bot))
     asyncio.create_task(check_expired_rides(bot))
     asyncio.create_task(cleanup_daily_topics(bot))
+    asyncio.create_task(check_timeout_games())
+    
     
     await set_commands(bot)
     
