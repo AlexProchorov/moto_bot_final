@@ -10,6 +10,9 @@ from database.engine import get_session
 from database.models import User
 import asyncio
 from datetime import datetime, timedelta
+import html
+from collections import Counter
+
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
@@ -140,3 +143,87 @@ async def show_participants_panel(message: Message):
         reply_markup=kb,
         parse_mode="Markdown"
     )
+
+
+
+async def stats_bikes_callback(callback: CallbackQuery):
+    """Выводит статистику по маркам и моделям мотоциклов."""
+    try:
+        users = get_all_users()
+        bike_counter = Counter()
+        model_counter = Counter()
+        total_with_bike = 0
+
+        for user in users:
+            bike = user.get('bike', '')
+            if bike and bike.strip():
+                total_with_bike += 1
+                parts = bike.split(maxsplit=1)
+                brand = parts[0] if parts else "Неизвестно"
+                model = parts[1] if len(parts) > 1 else ""
+                bike_counter[brand] += 1
+                if model:
+                    model_counter[(brand, model)] += 1
+
+        if not bike_counter:
+            await callback.message.answer("📊 Нет данных о мотоциклах среди зарегистрированных.")
+            return
+
+        text = "<b>📊 Статистика по мотоциклам</b>\n\n"
+        text += f"👥 Всего зарегистрировано: {len(users)}\n"
+        text += f"🏍 Указали мотоцикл: {total_with_bike}\n\n"
+        text += "<b>Марки:</b>\n"
+        for brand, count in bike_counter.most_common():
+            text += f"• {html.escape(brand)}: {count}\n"
+        text += "\n<b>Модели (топ-10):</b>\n"
+        for (brand, model), count in model_counter.most_common(10):
+            text += f"• {html.escape(brand)} {html.escape(model)}: {count}\n"
+
+        if len(text) > 4000:
+            for i in range(0, len(text), 4000):
+                await callback.message.answer(text[i:i+4000], parse_mode="HTML")
+        else:
+            await callback.message.answer(text, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Ошибка в stats_bikes_callback: {e}")
+        await callback.message.answer("❌ Не удалось получить статистику.")
+
+async def detailed_list_callback(callback: CallbackQuery):
+    """Выводит подробный список участников."""
+    try:
+        users = get_all_users()
+        if not users:
+            await callback.message.answer("📭 Нет зарегистрированных участников.")
+            return
+
+        # Получаем округа для всех пользователей
+        from database.engine import get_session
+        from database.models import User
+        district_map = {}
+        with get_session() as session:
+            for u in session.query(User.telegram_id, User.district).all():
+                district_map[u.telegram_id] = u.district or "не указан"
+
+        text = "<b>📋 Подробный список участников:</b>\n\n"
+        for user in users:
+            name = html.escape(user['name'] or "Без имени")
+            username = user['username']
+            uid = user['id']
+            bike = html.escape(user.get('bike', 'не указан'))
+            district = html.escape(district_map.get(uid, "не указан"))
+
+            if username:
+                mention = f"@{html.escape(username)}"
+            else:
+                mention = f'<a href="tg://user?id={uid}">{name}</a>'
+
+            text += f"• {mention} — {bike} — {district}\n"
+            if len(text) > 3800:   # оставляем запас для сообщения
+                await callback.message.answer(text, parse_mode="HTML")
+                text = ""
+
+        if text:
+            await callback.message.answer(text, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Ошибка в detailed_list_callback: {e}")
+        await callback.message.answer("❌ Не удалось получить список участников.")
