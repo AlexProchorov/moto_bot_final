@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import random
 from datetime import datetime
@@ -14,6 +15,8 @@ from database.crud import (
 )
 from database.engine import get_session
 from database.models import User, Game
+from database.crud import is_any_game_active_or_pending
+
 
 logger = logging.getLogger(__name__)
 router = Router(name="tictactoe")

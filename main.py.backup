@@ -15,6 +15,9 @@ from middleware.admin_check import AdminCheckMiddleware
 from handlers import tictactoe 
 from aiohttp import ClientSession
 from utils.game_scheduler import check_timeout_games
+from handlers import wash_admin, wash_user
+from handlers import wash_admin, wash_user
+from utils.wash_scheduler import check_wash_reminders
 
 from aiohttp_socks import ProxyConnector
 from aiogram import Bot
@@ -34,6 +37,7 @@ async def set_commands(bot: Bot):
         BotCommand(command="ride_menu", description="🏍 Меню заездов"),
         BotCommand(command="games", description="🎲 Меню игр"), 
         BotCommand(command="wash", description="🧼 Записаться на мойку"),
+        BotCommand(command="weather_settings", description="🌦 Вкл/выкл погоду"),
 
     ]
     await bot.set_my_commands(common_commands, scope=BotCommandScopeAllPrivateChats())
@@ -59,6 +63,7 @@ async def main():
     
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage) 
+    asyncio.create_task(check_wash_reminders(bot))    
     dp.message.middleware(AdminCheckMiddleware())
     dp.callback_query.middleware(AdminCheckMiddleware())
     
@@ -76,6 +81,9 @@ async def main():
     asyncio.create_task(check_expired_rides(bot))
     asyncio.create_task(cleanup_daily_topics(bot))
     asyncio.create_task(check_timeout_games())
+    dp.include_router(wash_admin.router)
+    dp.include_router(wash_admin.router)
+    dp.include_router(wash_user.router)    
 
     await set_commands(bot)
     

@@ -1,0 +1,667 @@
+import logging
+from aiogram.filters import Command
+from aiogram.types import Message  # добавлено
+from config import ADMIN_IDS, GROUP_CHAT_ID
+from database.crud import get_all_users, get_all_birthdays_sorted, get_upcoming_birthdays
+from database.models import User
+from database.crud import get_all_users
+from aiogram.fsm.context import FSMContext
+from aiogram.types import ChatMember, ChatMemberUpdated, InlineKeyboardButton
+from aiogram import Router, F, Bot
+from aiogram.filters import Command
+from aiogram.types import Message, InlineKeyboardMarkup, CallbackQuery, ChatPermissions
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+import asyncio
+from database.crud import get_all_users, set_setting, get_users_by_district
+from datetime import datetime, timedelta
+from database.engine import get_session
+from database.crud import  set_setting, get_registered_users_count
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+logger = logging.getLogger(__name__)
+router = Router(name="admin")
+@router.message(Command("admin_panel"))
+async def admin_panel_cmd(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Инициализировать регистрацию", callback_data="admin:init")],
+        [InlineKeyboardButton(text="📋 Список участников", callback_data="admin:participants")],
+        [InlineKeyboardButton(text="🎂 Дни рождения (все)", callback_data="admin:bd_all")],
+        [InlineKeyboardButton(text="🎂 Ближайшие ДР (30 дней)", callback_data="admin:bd_soon")],
+        [InlineKeyboardButton(text="🌦 Включить рассылку погоды", callback_data="admin:weather_on")],
+        [InlineKeyboardButton(text="🌦 Отключить рассылку погоды", callback_data="admin:weather_off")],
+        [InlineKeyboardButton(text="🔇 Замутить пользователя", callback_data="admin:mute")],
+    ])
+    await message.answer("🛠 *Панель администратора*\nВыберите действие:", reply_markup=kb, parse_mode="Markdown")
+
+
+def is_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS
+
+
+# ========== СУЩЕСТВУЮЩАЯ КОМАНДА /init ==========
+@router.message(Command("init"))
+async def init_cmd(message: Message):
+    if message.chat.type != "private":
+        await message.answer("Команду /init используйте в личных сообщениях с ботом.")
+        return
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    if not GROUP_CHAT_ID:
+        await message.answer("❌ GROUP_CHAT_ID не задан в .env")
+        return
+
+    me = await message.bot.get_me()
+    url = f"https://t.me/{me.username}?start=register"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Зарегистрироваться", url=url)]
+    ])
+    await message.bot.send_message(
+        chat_id=GROUP_CHAT_ID,
+        text=("🏍 Добро пожаловать в моточат!\n\n"
+              "Чтобы зарегистрироваться, нажмите кнопку ниже — бот откроется в личке."),
+        reply_markup=kb,
+    )
+    await message.answer("✅ Кнопка регистрации отправлена в группу.")
+    logger.info("Admin %s sent init message to group", message.from_user.id)
+
+
+@router.message(Command("participants_info"))
+async def participants_info(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    await show_participants_panel(message)
+
+async def show_participants_panel(message: Message):
+    # 1. Количество зарегистрированных в боте
+    registered_count = get_registered_users_count()   # напишем ниже
+    # 2. Общее количество участников в группе
+    try:
+        total_users = await message.bot.get_chat_member_count(GROUP_CHAT_ID)
+    except Exception as e:
+        total_users = "неизвестно"
+        logger.error(f"Ошибка получения количества участников группы: {e}")
+
+    # Клавиатура
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика по мотоциклам", callback_data="admin:stats_bikes")],
+        [InlineKeyboardButton(text="📋 Подробный список участников", callback_data="admin:detailed_list")],
+    ])
+    await message.answer(
+        f"👥 *Статистика сообщества*\n\n"
+        f"📌 Зарегистрировано в боте: `{registered_count}`\n"
+        f"📌 Всего участников в группе: `{total_users}`\n\n"
+        f"Выберите дополнительную информацию:",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+
+@router.message(Command("bd_info"))
+async def bd_info(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    birthdays = get_all_birthdays_sorted()
+    if not birthdays:
+        await message.answer("📭 В базе нет данных о днях рождения.")
+        return
+
+    response = "🎂 Дни рождения участников:\n\n"
+    for b in birthdays:
+        response += f"• {b['name']} (@{b['username'] or 'нет юзернейма'}) — {b['birthday']}\n"
+    await message.answer(response)
+
+@router.message(Command("bd_info_soon"))
+async def bd_info_soon(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    upcoming = get_upcoming_birthdays(days=30)
+    if not upcoming:
+        await message.answer("🎉 Ближайших дней рождения в течение 30 дней нет.")
+        return
+
+    response = "🎂 Ближайшие дни рождения (в течение 30 дней):\n\n"
+    for b in upcoming:
+        response += f"• {b['name']} (@{b['username'] or 'нет юзернейма'}) — {b['birthday']} (через {b['days_left']} дн.)\n"
+    await message.answer(response)
+
+
+@router.message(Command("weather_on"))
+async def weather_on(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    set_setting("weather_broadcast_enabled", "true")
+    await message.answer("✅ Рассылка прогноза погоды включена.")
+
+@router.message(Command("weather_off"))
+async def weather_off(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    set_setting("weather_broadcast_enabled", "false")
+    await message.answer("❌ Рассылка прогноза погоды выключена.")
+
+
+
+# FSM для бана
+class MuteStates(StatesGroup):
+    waiting_user_input = State()
+    waiting_duration = State()
+
+
+@router.message(Command("mute_user"))
+async def mute_user_cmd(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    if message.chat.type != "private":
+        await message.answer("Команда доступна только в ЛС.")
+        return
+    await message.answer("Введите числовой ID пользователя (можно получить через @userinfobot или ответом на сообщение командой /get_user_id):")
+    await state.set_state(MuteStates.waiting_user_input)
+    await state.update_data(chat_id=GROUP_CHAT_ID)
+
+@router.message(MuteStates.waiting_user_input)
+async def mute_user_input(message: Message, state: FSMContext):
+    user_input = message.text.strip()
+    if not user_input.isdigit():
+        await message.answer("❌ Введите числовой ID.")
+        return
+    user_id = int(user_input)
+    try:
+        member = await message.bot.get_chat_member(GROUP_CHAT_ID, user_id)
+        user_name = member.user.full_name or member.user.first_name
+    except Exception:
+        await message.answer(f"❌ Пользователь с ID {user_id} не найден в группе.")
+        await state.clear()
+        return
+    await state.update_data(target_user_id=user_id, target_user_name=user_name)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="5 минут", callback_data="mute_duration:5")],
+        [InlineKeyboardButton(text="30 минут", callback_data="mute_duration:30")],
+        [InlineKeyboardButton(text="60 минут", callback_data="mute_duration:60")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="mute_cancel")]
+    ])
+    await message.answer(f"Выбран пользователь: {user_name}. Выберите время мута:", reply_markup=kb)
+    await state.set_state(MuteStates.waiting_duration)
+
+@router.callback_query(MuteStates.waiting_duration, F.data.startswith("mute_duration:"))
+async def mute_duration_selected(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    await callback.answer()
+    duration = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    user_id = data['target_user_id']
+    user_name = data['target_user_name']
+    chat_id = data['chat_id']
+
+    # Проверка прав бота
+    bot_member = await bot.get_chat_member(chat_id, bot.id)
+    if not bot_member.can_restrict_members:
+        await callback.message.edit_text(
+            "❌ У бота нет права 'Блокировка пользователей'.\n\n"
+            "Выдайте это право в настройках группы, затем перезапустите бота командой:\n"
+            "`systemctl restart motobot`"
+        )
+        await state.clear()
+        return
+
+    until_date = datetime.now() + timedelta(minutes=duration)
+    permissions = ChatPermissions(
+        can_send_messages=False,
+        can_send_media_messages=False,
+        can_send_other_messages=False,
+        can_add_web_page_previews=False
+    )
+
+    try:
+        await bot.restrict_chat_member(chat_id, user_id, permissions=permissions, until_date=until_date)
+    except Exception as e:
+        logger.error(f"Mute error: {e}")
+        await callback.message.edit_text(f"❌ Ошибка: {e}")
+        await state.clear()
+        return
+
+    # Креативное сообщение
+    if duration == 5:
+        msg = f"🔇 {user_name}, остынь! Мут на 5 минут."
+    elif duration == 30:
+        msg = f"🤫 {user_name}, охладись! Мут на 30 минут."
+    else:
+        msg = f"🔕 {user_name}, замёрзни! Мут на 60 минут."
+    await bot.send_message(chat_id, msg)
+
+    # Планируем снятие мута
+    async def unmute():
+        await asyncio.sleep(duration * 60)
+        try:
+            permissions = ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
+            )
+            await bot.restrict_chat_member(chat_id, user_id, permissions=permissions)
+            await bot.send_message(chat_id, f"✅ {user_name} может снова писать.")
+        except Exception as e:
+            logger.error(f"Unmute error: {e}")
+
+    asyncio.create_task(unmute())
+
+    await callback.message.edit_text(f"✅ Пользователю {user_name} запрещено писать на {duration} минут.")
+    await state.clear()
+
+@router.callback_query(F.data == "mute_cancel")
+async def mute_cancel(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.edit_text("❌ Операция отменена.")
+    await state.clear()
+
+@router.message(Command("get_user_id"))
+async def get_user_id_cmd(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    if not message.reply_to_message:
+        await message.answer("Ответьте на сообщение пользователя, чей ID хотите узнать.")
+        return
+    user_id = message.reply_to_message.from_user.id
+    await message.answer(f"ID пользователя: `{user_id}`", parse_mode="Markdown")
+
+
+
+@router.message(Command("admin_panel"))
+async def admin_panel_cmd(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Инициализировать регистрацию", callback_data="admin:init")],
+        [InlineKeyboardButton(text="📋 Список участников", callback_data="admin:participants")],
+        [InlineKeyboardButton(text="🎂 Дни рождения (все)", callback_data="admin:bd_all")],
+        [InlineKeyboardButton(text="🎂 Ближайшие ДР (30 дней)", callback_data="admin:bd_soon")],
+        [InlineKeyboardButton(text="🌦 Включить рассылку погоды", callback_data="admin:weather_on")],
+        [InlineKeyboardButton(text="🌦 Отключить рассылку погоды", callback_data="admin:weather_off")],
+        [InlineKeyboardButton(text="🔇 Замутить пользователя", callback_data="admin:mute")],
+        [InlineKeyboardButton(text="➕ Создать плановый заезд", callback_data="admin:new_ride")],
+        [InlineKeyboardButton(text="🏁 Отменить плановый заезд", callback_data="admin:end_ride")],
+    ])
+    await message.answer("🛠 *Панель администратора*\nВыберите действие:", reply_markup=kb, parse_mode="Markdown")
+
+
+@router.callback_query(F.data.startswith("admin:"))
+async def admin_callback_handler(callback: CallbackQuery):
+    await callback.answer()
+    action = callback.data.split(":")[1]
+    user_id = callback.from_user.id
+    if not is_admin(user_id):
+        await callback.message.answer("⛔ Только для админов.")
+        return
+
+    if action == "init":
+        me = await callback.bot.get_me()
+        url = f"https://t.me/{me.username}?start=register"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Зарегистрироваться", url=url)]
+        ])
+        await callback.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text=("🏍 Добро пожаловать в моточат!\n\n"
+                  "Чтобы зарегистрироваться, нажмите кнопку ниже — бот откроется в личке."),
+            reply_markup=kb,
+        )
+        await callback.message.answer("✅ Кнопка регистрации отправлена в группу.")
+        logger.info("Admin %s sent init message to group", user_id)
+
+    elif action == "participants":
+        await show_participants_panel(callback.message)
+    elif action == "stats_bikes":
+        await stats_bikes_callback(callback)
+    elif action == "detailed_list":
+        await detailed_list_callback(callback)
+
+    elif action == "bd_all":
+        birthdays = get_all_birthdays_sorted()
+        if not birthdays:
+            await callback.message.answer("📭 В базе нет данных о днях рождения.")
+            return
+        response = "🎂 Дни рождения участников:\n\n"
+        for b in birthdays:
+            response += f"• {b['name']} (@{b['username'] or 'нет юзернейма'}) — {b['birthday']}\n"
+        await callback.message.answer(response)
+
+    elif action == "bd_soon":
+        upcoming = get_upcoming_birthdays(days=30)
+        if not upcoming:
+            await callback.message.answer("🎉 Ближайших дней рождения в течение 30 дней нет.")
+            return
+        response = "🎂 Ближайшие дни рождения (в течение 30 дней):\n\n"
+        for b in upcoming:
+            response += f"• {b['name']} (@{b['username'] or 'нет юзернейма'}) — {b['birthday']} (через {b['days_left']} дн.)\n"
+        await callback.message.answer(response)
+
+    elif action == "weather_on":
+        set_setting("weather_broadcast_enabled", "true")
+        await callback.message.answer("✅ Рассылка прогноза погоды включена.")
+
+    elif action == "weather_off":
+        set_setting("weather_broadcast_enabled", "false")
+        await callback.message.answer("❌ Рассылка прогноза погоды выключена.")
+
+    elif action == "mute":
+        await callback.message.answer("Используйте команду /mute_user в ЛС.")
+
+    elif action == "new_ride":
+        await callback.message.answer(
+            "Для создания планового заезда используйте команду `/new_ride` в ЛС.\n"
+            "Бот попросит ввести название, дату, время, место и описание."
+        )
+    elif action == "end_ride":
+        await callback.message.answer(
+            "Для отмены планового заезда используйте команду `/end_ride <id_заезда>` в ЛС.\n"
+            "ID заезда можно узнать командой `/rides`."
+        )
+
+@router.callback_query(F.data == "admin:stats_bikes")
+async def stats_bikes_callback(callback: CallbackQuery):
+    await callback.answer()
+    # Группировка по марке и модели
+    from sqlalchemy import func
+    with get_session() as session:
+        bikes = session.query(User.bike_brand, User.bike_model, func.count(User.id)).filter(
+            User.bike_brand.isnot(None), User.bike_model.isnot(None)
+        ).group_by(User.bike_brand, User.bike_model).all()
+    if not bikes:
+        await callback.message.answer("📭 Данных о мотоциклах пока нет.")
+        return
+    text = "🏍 *Статистика мотоциклов:*\n\n"
+    for brand, model, count in bikes:
+        text += f"• {brand} {model} — {count} шт.\n"
+    await callback.message.answer(text, parse_mode="Markdown")
+
+@router.callback_query(F.data == "admin:detailed_list")
+async def detailed_list_callback(callback: CallbackQuery):
+    await callback.answer()
+    users = get_all_users()
+    if not users:
+        await callback.message.answer("📭 Пока нет зарегистрированных участников.")
+        return
+    response = "📋 *Список участников:*\n\n"
+    for u in users:
+        response += f"• {u['name']} (@{u['username'] or 'нет юзернейма'})\n"
+        response += f"  🏍 {u['bike']}\n"
+    # Если сообщение слишком длинное, разбиваем
+    if len(response) > 4000:
+        # можно разбить на части или отправить файлом
+        await callback.message.answer("Слишком длинный список, отправляю файлом.")
+        # альтернатива: отправить текстовым файлом
+        import io
+        file = io.BytesIO(response.encode())
+        await callback.bot.send_document(callback.from_user.id, document=file, filename="participants.txt")
+    else:
+        await callback.message.answer(response, parse_mode=None)
+
+
+@router.message(Command("test_weather"))
+async def test_weather(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    from utils.weather_scheduler import send_weather_to_group, send_weather_to_users
+    await send_weather_to_group(message.bot, is_morning=True)
+    await send_weather_to_users(message.bot, is_morning=True)
+    await message.answer("✅ Тестовая рассылка погоды выполнена. Проверьте группу и личные сообщения.")
+
+
+router = Router(name="wash_admin")
+def is_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS
+
+# FSM для настройки услуги
+class WashSetupStates(StatesGroup):
+    waiting_description = State()
+    waiting_price = State()
+    waiting_provider_name = State()
+    waiting_provider_phone = State()
+    waiting_provider_tg_id = State()
+    waiting_photo = State()
+
+# FSM для настройки расписания
+class WashScheduleStates(StatesGroup):
+    waiting_day = State()
+    waiting_start_time = State()
+    waiting_end_time = State()
+    waiting_duration = State()
+
+@router.callback_query(F.data == "admin:wash_setup")
+async def wash_setup(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Только для админов.", show_alert=True)
+        return
+    await callback.answer()
+    with get_session() as session:
+        service = session.query(WashService).first()
+        if service:
+            text = f"Текущая услуга:\n{service.description}\nЦена: {service.price} руб.\nИсполнитель: {service.provider_name}, тел. {service.provider_phone}, TG ID: {service.provider_tg_id}"
+            if service.photos:
+                text += "\nФото загружены."
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✏️ Изменить описание", callback_data="admin:wash_edit_desc")],
+                [InlineKeyboardButton(text="💰 Изменить цену", callback_data="admin:wash_edit_price")],
+                [InlineKeyboardButton(text="👤 Изменить исполнителя", callback_data="admin:wash_edit_provider")],
+                [InlineKeyboardButton(text="🖼 Добавить фото", callback_data="admin:wash_photo")],
+                [InlineKeyboardButton(text="🗑 Удалить услугу", callback_data="admin:wash_delete")]
+            ])
+            await callback.message.answer(text, reply_markup=kb, parse_mode="Markdown")
+        else:
+            await callback.message.answer("Настройка новой услуги.\nВведите описание (адрес, что входит, контакты и т.п.):")
+            await state.set_state(WashSetupStates.waiting_description)
+
+@router.message(WashSetupStates.waiting_description)
+async def wash_desc(message: Message, state: FSMContext):
+    await state.update_data(description=message.text)
+    await message.answer("Введите стоимость мойки (в рублях):")
+    await state.set_state(WashSetupStates.waiting_price)
+
+@router.message(WashSetupStates.waiting_price)
+async def wash_price(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("Введите число.")
+        return
+    await state.update_data(price=int(message.text))
+    await message.answer("Введите имя исполнителя (например, Анатолий):")
+    await state.set_state(WashSetupStates.waiting_provider_name)
+
+@router.message(WashSetupStates.waiting_provider_name)
+async def wash_provider_name(message: Message, state: FSMContext):
+    await state.update_data(provider_name=message.text)
+    await message.answer("Введите телефон исполнителя:")
+    await state.set_state(WashSetupStates.waiting_provider_phone)
+
+@router.message(WashSetupStates.waiting_provider_phone)
+async def wash_provider_phone(message: Message, state: FSMContext):
+    await state.update_data(provider_phone=message.text)
+    await message.answer("Введите Telegram ID исполнителя (цифры):")
+    await state.set_state(WashSetupStates.waiting_provider_tg_id)
+
+@router.message(WashSetupStates.waiting_provider_tg_id)
+async def wash_provider_tg_id(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("Введите числовой ID.")
+        return
+    await state.update_data(provider_tg_id=int(message.text))
+    data = await state.get_data()
+    with get_session() as session:
+        service = WashService(
+            name="Мойка",
+            description=data['description'],
+            price=data['price'],
+            provider_name=data['provider_name'],
+            provider_phone=data['provider_phone'],
+            provider_tg_id=data['provider_tg_id'],
+            is_active=True
+        )
+        session.add(service)
+        session.commit()
+        await state.clear()
+        await message.answer("✅ Услуга создана. Теперь можно загрузить фото (команда /add_wash_photo) или настроить расписание через админ-панель.")
+
+
+@router.message(Command("add_wash_photo"))
+async def add_wash_photo(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Только для админов.")
+        return
+    await message.answer("Отправьте фото (можно несколько, каждое отдельным сообщением). После отправки всех фото напишите /done")
+    await state.set_state(WashSetupStates.waiting_photo)
+    await state.update_data(photos=[])
+
+@router.message(WashSetupStates.waiting_photo)
+async def save_photo(message: Message, state: FSMContext):
+    if message.text == "/done":
+        data = await state.get_data()
+        photos = data.get('photos', [])
+        with get_session() as session:
+            service = session.query(WashService).first()
+            if service:
+                service.photos = ','.join(photos)
+                session.commit()
+        await state.clear()
+        await message.answer("✅ Фото сохранены.")
+        return
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        data = await state.get_data()
+        photos = data.get('photos', [])
+        photos.append(file_id)
+        await state.update_data(photos=photos)
+        await message.answer("Фото добавлено. Отправьте ещё или /done")
+    else:
+        await message.answer("Отправьте фото или /done")
+
+
+@router.callback_query(F.data == "admin:wash_schedule")
+async def wash_schedule_menu(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Только для админов.", show_alert=True)
+        return
+    await callback.answer()
+    # Показать список дней для выбора
+    days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=day, callback_data=f"wash_day:{i}")] for i, day in enumerate(days)
+    ])
+    await callback.message.answer("Выберите день недели:", reply_markup=kb)
+
+@router.callback_query(F.data.startswith("wash_day:"))
+async def wash_schedule_day(callback: CallbackQuery, state: FSMContext):
+    day = int(callback.data.split(":")[1])
+    await state.update_data(day=day)
+    await callback.message.answer("Введите время начала (например, 10:00):")
+    await state.set_state(WashScheduleStates.waiting_start_time)
+    await callback.answer()
+
+@router.message(WashScheduleStates.waiting_start_time)
+async def wash_schedule_start(message: Message, state: FSMContext):
+    # простая валидация формата HH:MM
+    await state.update_data(start_time=message.text.strip())
+    await message.answer("Введите время окончания (например, 18:00):")
+    await state.set_state(WashScheduleStates.waiting_end_time)
+
+@router.message(WashScheduleStates.waiting_end_time)
+async def wash_schedule_end(message: Message, state: FSMContext):
+    await state.update_data(end_time=message.text.strip())
+    data = await state.get_data()
+    with get_session() as session:
+        service = session.query(WashService).first()
+        if service:
+            schedule = WashSchedule(
+                service_id=service.id,
+                day_of_week=data['day'],
+                start_time=data['start_time'],
+                end_time=data['end_time'],
+                slot_duration_min=60
+            )
+            session.add(schedule)
+            session.commit()
+            await message.answer(f"✅ Расписание на {['Пн','Вт','Ср','Чт','Пт','Сб','Вс'][data['day']]} добавлено.")
+        else:
+            await message.answer("❌ Сначала создайте услугу через /admin_panel -> Настроить мойку.")
+    await state.clear()
+
+
+
+@router.callback_query(F.data.startswith("admin:"))
+async def admin_callback_handler(callback: CallbackQuery):
+    await callback.answer()
+    action = callback.data.split(":")[1]
+    user_id = callback.from_user.id
+    if not is_admin(user_id):
+        await callback.message.answer("⛔ Только для админов.")
+        return
+
+    if action == "init":
+        me = await callback.bot.get_me()
+        url = f"https://t.me/{me.username}?start=register"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Зарегистрироваться", url=url)]
+        ])
+        await callback.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text=("🏍 Добро пожаловать в моточат!\n\n"
+                  "Чтобы зарегистрироваться, нажмите кнопку ниже — бот откроется в личке."),
+            reply_markup=kb,
+        )
+        await callback.message.answer("✅ Кнопка регистрации отправлена в группу.")
+        logger.info("Admin %s sent init message to group", user_id)
+
+    elif action == "participants":
+        users = get_all_users()
+        if not users:
+            await callback.message.answer("📭 Пока нет зарегистрированных участников.")
+            return
+        response = "📋 Список участников:\n\n"
+        for u in users:
+            response += f"• {u['name']} (@{u['username'] or 'нет юзернейма'})\n"
+            response += f"  🏍 {u['bike']}\n"
+        await callback.message.answer(response)
+
+    elif action == "bd_all":
+        birthdays = get_all_birthdays_sorted()
+        if not birthdays:
+            await callback.message.answer("📭 В базе нет данных о днях рождения.")
+            return
+        response = "🎂 Дни рождения участников:\n\n"
+        for b in birthdays:
+            response += f"• {b['name']} (@{b['username'] or 'нет юзернейма'}) — {b['birthday']}\n"
+        await callback.message.answer(response)
+
+    elif action == "bd_soon":
+        upcoming = get_upcoming_birthdays(days=30)
+        if not upcoming:
+            await callback.message.answer("🎉 Ближайших дней рождения в течение 30 дней нет.")
+            return
+        response = "🎂 Ближайшие дни рождения (в течение 30 дней):\n\n"
+        for b in upcoming:
+            response += f"• {b['name']} (@{b['username'] or 'нет юзернейма'}) — {b['birthday']} (через {b['days_left']} дн.)\n"
+        await callback.message.answer(response)
+
+    elif action == "weather_on":
+        set_setting("weather_broadcast_enabled", "true")
+        await callback.message.answer("✅ Рассылка прогноза погоды включена.")
+
+    elif action == "weather_off":
+        set_setting("weather_broadcast_enabled", "false")
+        await callback.message.answer("❌ Рассылка прогноза погоды выключена.")
+
+    elif action == "mute":
+        await callback.message.answer("Используйте команду /mute_user в ЛС.")
+    else:
+        await callback.message.answer("Неизвестное действие.")

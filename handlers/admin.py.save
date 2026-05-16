@@ -36,6 +36,44 @@ async def admin_panel_cmd(message: Message):
     ])
     await message.answer("🛠 *Панель администратора*\nВыберите действие:", reply_markup=kb, parse_mode="Markdown")
 
+
+
+
+@router.callback_query(F.data == "admin:stats_bikes")
+async def stats_bikes_callback(callback: CallbackQuery):
+    await callback.answer()
+    from sqlalchemy import func
+    with get_session() as session:
+        bikes = session.query(User.bike_brand, User.bike_model, func.count(User.id)).filter(
+            User.bike_brand.isnot(None), User.bike_model.isnot(None)
+        ).group_by(User.bike_brand, User.bike_model).all()
+    if not bikes:
+        await callback.message.answer("📭 Данных о мотоциклах пока нет.")
+        return
+    text = "🏍 *Статистика мотоциклов:*\n\n"
+    for brand, model, count in bikes:
+        text += f"• {brand} {model} — {count} шт.\n"
+    await callback.message.answer(text, parse_mode="Markdown")
+
+@router.callback_query(F.data == "admin:detailed_list")
+async def detailed_list_callback(callback: CallbackQuery):
+    await callback.answer()
+    users = get_all_users()
+    if not users:
+        await callback.message.answer("📭 Пока нет зарегистрированных участников.")
+        return
+    response = "📋 *Список участников:*\n\n"
+    for u in users:
+        response += f"• {u['name']} (@{u['username'] or 'нет юзернейма'})\n"
+        response += f"  🏍 {u['bike']}\n"
+    if len(response) > 4000:
+        import io
+        file = io.BytesIO(response.encode())
+        await callback.bot.send_document(callback.from_user.id, document=file, filename="participants.txt")
+    else:
+        await callback.message.answer(response, parse_mode=None)
+
+
 # ---------- Обработчик кнопок ----------
 @router.callback_query(F.data.startswith("admin:"))
 async def admin_callback_handler(callback: CallbackQuery):
@@ -62,12 +100,13 @@ async def admin_callback_handler(callback: CallbackQuery):
         logger.info("Admin %s sent init message to group", user_id)
 
     elif action == "participants":
-        await show_participants_panel(callback.message)
-    elif action == "stats_bikes":
-        await stats_bikes_callback(callback)
-    elif action == "detailed_list":
-        await detailed_list_callback(callback)
-
+        registered_count = get_registered_users_count()
+        try:
+            total_users = await callback.bot.get_chat_member_count(GROUP_CHAT_ID)
+        except:
+            total_users = "неизвестно"
+        text = f"👥 *Статистика сообщества*\n\n📌 Зарегистрировано в боте: `{registered_count}`\n📌 Всего участников в группе: `{total_users}`"
+        await callback.message.answer(text, parse_mode="Markdown")
 
     elif action == "bd_all":
         birthdays = get_all_birthdays_sorted()
@@ -115,28 +154,3 @@ async def admin_callback_handler(callback: CallbackQuery):
 
 # ---------- Остальные админ-команды (init, participants_info, bd_info, weather_on/off, mute_user, get_user_id) ----------
 # Они уже есть в вашем файле, я их не удаляю. Просто убедитесь, что они не дублируются.
-
-async def show_participants_panel(message: Message):
-    # 1. Количество зарегистрированных в боте
-    from database.crud import get_registered_users_count
-    registered_count = get_registered_users_count()
-    # 2. Общее количество участников в группе
-    try:
-        total_users = await message.bot.get_chat_member_count(GROUP_CHAT_ID)
-    except Exception as e:
-        total_users = "неизвестно"
-        logger.error(f"Ошибка получения количества участников группы: {e}")
-
-    # Клавиатура
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика по мотоциклам", callback_data="admin:stats_bikes")],
-        [InlineKeyboardButton(text="📋 Подробный список участников", callback_data="admin:detailed_list")],
-    ])
-    await message.answer(
-        f"👥 *Статистика сообщества*\n\n"
-        f"📌 Зарегистрировано в боте: `{registered_count}`\n"
-        f"📌 Всего участников в группе: `{total_users}`\n\n"
-        f"Выберите дополнительную информацию:",
-        reply_markup=kb,
-        parse_mode="Markdown"
-    )

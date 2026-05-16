@@ -495,6 +495,20 @@ def finalize_game(game_id: int):
             session.commit()
 
 
+def get_users_with_notifications_enabled():
+    with get_session() as session:
+        users = session.query(User).filter(User.district.isnot(None), User.weather_notifications == True).all()
+        return [{"id": u.telegram_id, "name": u.name, "district": u.district} for u in users]
+
+
+def get_registered_users_count():
+    with get_session() as session:
+        return session.query(User).count()
+
+
+
+
+
 def update_user_weather_notifications(telegram_id: int, enabled: bool):
     with get_session() as session:
         user = session.query(User).filter(User.telegram_id == telegram_id).first()
@@ -502,6 +516,106 @@ def update_user_weather_notifications(telegram_id: int, enabled: bool):
             user.weather_notifications = enabled
             session.commit()
 
+
+# ---------- Функции для мойки ----------
+def create_wash_service(name, description, price, provider_name, provider_phone, provider_tg_id):
+    with get_session() as session:
+        service = WashService(
+            name=name,
+            description=description,
+            price=price,
+            provider_name=provider_name,
+            provider_phone=provider_phone,
+            provider_tg_id=provider_tg_id
+        )
+        session.add(service)
+        session.commit()
+        return service.id
+
+def get_wash_service():
+    with get_session() as session:
+        return session.query(WashService).filter(WashService.is_active == True).first()
+
+def update_wash_service(service_id, **kwargs):
+    with get_session() as session:
+        service = session.query(WashService).filter(WashService.id == service_id).first()
+        if service:
+            for key, value in kwargs.items():
+                setattr(service, key, value)
+            session.commit()
+
+def add_wash_schedule(service_id, day_of_week, start_time, end_time, slot_duration=60):
+    with get_session() as session:
+        schedule = WashSchedule(
+            service_id=service_id,
+            day_of_week=day_of_week,
+            start_time=start_time,
+            end_time=end_time,
+            slot_duration_min=slot_duration
+        )
+        session.add(schedule)
+        session.commit()
+
+def get_wash_schedules(service_id):
+    with get_session() as session:
+        return session.query(WashSchedule).filter(WashSchedule.service_id == service_id).all()
+
+def get_free_slots_for_date(date):
+    service = get_wash_service()
+    if not service:
+        return []
+    schedules = get_wash_schedules(service.id)
+    day_of_week = date.weekday()  # понедельник=0
+    day_schedules = [s for s in schedules if s.day_of_week == day_of_week]
+    if not day_schedules:
+        return []
+    # Генерируем слоты на основе расписания
+    slots = []
+    for sched in day_schedules:
+        start_h, start_m = map(int, sched.start_time.split(':'))
+        end_h, end_m = map(int, sched.end_time.split(':'))
+        current = datetime.combine(date, datetime.min.time()) + timedelta(hours=start_h, minutes=start_m)
+        end = datetime.combine(date, datetime.min.time()) + timedelta(hours=end_h, minutes=end_m)
+        while current + timedelta(minutes=sched.slot_duration_min) <= end:
+            slot_end = current + timedelta(minutes=sched.slot_duration_min)
+            # Проверим, не занят ли уже слот
+            existing = session.query(WashSlot).filter(
+                WashSlot.service_id == service.id,
+                WashSlot.date == date.isoformat(),
+                WashSlot.start_time == current.strftime("%H:%M")
+            ).first()
+            if not existing:
+                # Создаём слот, если его нет
+                new_slot = WashSlot(
+                    service_id=service.id,
+                    date=date.isoformat(),
+                    start_time=current.strftime("%H:%M"),
+                    end_time=slot_end.strftime("%H:%M"),
+                    is_booked=False
+                )
+                session.add(new_slot)
+                session.commit()
+                slots.append({"id": new_slot.id, "start_time": new_slot.start_time, "end_time": new_slot.end_time})
+            else:
+                if not existing.is_booked:
+                    slots.append({"id": existing.id, "start_time": existing.start_time, "end_time": existing.end_time})
+            current = slot_end
+    return slots
+
+def create_wash_booking(slot_id, user_id):
+    with get_session() as session:
+        slot = session.query(WashSlot).filter(WashSlot.id == slot_id).first()
+        if slot and not slot.is_booked:
+            slot.is_booked = True
+            slot.booked_by = user_id
+            slot.booking_date = datetime.now()
+            slot.status = 'pending'
+            session.commit()
+            return True
+        return False
+
+
 def get_registered_users_count():
     with get_session() as session:
         return session.query(User).count()
+
