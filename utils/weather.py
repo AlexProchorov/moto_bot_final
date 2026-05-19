@@ -2,7 +2,7 @@ import aiohttp
 import logging
 from datetime import datetime, timedelta
 from config import WEATHER_API_KEY, WEATHER_CITY
-
+from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ========== Основные функции погоды ==========
@@ -116,7 +116,7 @@ def _set_cache(district: str, weather_data: dict):
         "expires_at": datetime.now() + timedelta(seconds=CACHE_TTL)
     }
 
-async def get_weather_cached(district: str) -> dict | None:
+async def get_weather_cached(district: str) -> Optional[dict]:
     """Возвращает погоду для района из кеша или запрашивает с API."""
     from utils.districts import DISTRICT_COORDS
     if _is_cache_valid(district):
