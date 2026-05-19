@@ -322,10 +322,11 @@ async def end_game(callback: CallbackQuery, bot: Bot):
         if not game:
             await callback.answer("Игра не найдена.", show_alert=True)
             return
-        if user_id not in (game.player_x_id, game.player_o_id) and user_id not in ADMIN_IDS:
+        if user_id not in (game.player_x_id, game.player_o_id) and not is_admin(user_id):
             await callback.answer("Только участники или админ могут завершить игру.", show_alert=True)
             return
-        finish_game(game_id, winner=None)
+        # Передаём все нужные параметры
+        finish_game(game_id, winner=None, bot=bot, chat_id=game.chat_id, thread_id=game.thread_id)
         await finish_game_ui(bot, game_id, winner=None)
 
 # ---------- Служебные команды ----------
@@ -396,7 +397,7 @@ async def abandon_confirm(callback: CallbackQuery, bot: Bot):
         if user_id not in (game.player_x_id, game.player_o_id):
             await callback.message.edit_text("❌ Вы не участник этой игры.")
             return
-        finish_game(game_id, winner=None)
+        finish_game(game_id, winner=None, bot=bot, chat_id=game.chat_id, thread_id=game.thread_id)
         await callback.message.edit_text("✅ Игра завершена (ничья). Теперь вы можете начать новую.")
         try:
             await bot.close_forum_topic(game.chat_id, game.thread_id)
@@ -413,8 +414,8 @@ async def abandon_cancel(callback: CallbackQuery):
     await callback.message.edit_text("❌ Отмена. Игра продолжается.")
 
 @router.message(Command("ttt_force_end"))
-async def force_end_game(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+async def force_end_game(message: Message, bot: Bot):
+    if not is_admin(message.from_user.id):
         await message.answer("⛔ Только для админов.")
         return
     args = message.text.split()
@@ -422,8 +423,14 @@ async def force_end_game(message: Message):
         await message.answer("❌ Используйте: `/ttt_force_end <game_id>`", parse_mode="Markdown")
         return
     game_id = int(args[1])
-    finish_game(game_id, winner=user_id, bot=bot, chat_id=game.chat_id, thread_id=game.thread_id)
-    await message.answer(f"✅ Игра #{game_id} принудительно завершена (ничья).")
+    with get_session() as session:
+        game = session.query(Game).filter(Game.id == game_id).first()
+        if not game:
+            await message.answer("❌ Игра не найдена.")
+            return
+        finish_game(game_id, winner=None, bot=bot, chat_id=game.chat_id, thread_id=game.thread_id)
+        await message.answer(f"✅ Игра #{game_id} принудительно завершена (ничья).")
+
 
 # ---------- Меню игр ----------
 @router.message(Command("games"))
@@ -460,10 +467,11 @@ async def games_stats_callback(callback: CallbackQuery):
     await callback.message.answer(text, parse_mode="Markdown")
 
 @router.callback_query(F.data == "games:reset")
-async def games_reset_callback(callback: CallbackQuery):
+async def games_reset_callback(callback: CallbackQuery, bot: Bot):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Только для админов!", show_alert=True)
         return
     await callback.answer()
-    reset_all_active_games()
+    reset_all_active_games()   # теперь она переводит и waiting_deletion в finished
+    # Дополнительно: можно закрыть/удалить все висящие темы игр (опционально)
     await callback.message.answer("✅ Все активные игры принудительно завершены. Теперь можно создавать новые.")

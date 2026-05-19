@@ -18,6 +18,10 @@ from utils.game_scheduler import check_timeout_games
 
 from aiohttp_socks import ProxyConnector
 from aiogram import Bot
+from handlers import ride_commands
+from handlers.spam_handler import router as spam_router  
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -30,21 +34,39 @@ async def set_commands(bot: Bot):
         BotCommand(command="delete_my_profile", description="Удалить анкету"),
         BotCommand(command="neighbors", description="Мои соседи"),
         BotCommand(command="weather_now", description="Погода сейчас"),
-        BotCommand(command="weather_settings", description="🌦 Вкл/выкл погоду"),        
+        BotCommand(command="weather_settings", description="🌦 Вкл/выкл погоду"),
         BotCommand(command="ride_menu", description="🏍 Меню заездов"),
-        BotCommand(command="games", description="🎲 Меню игр"), 
+        BotCommand(command="games", description="🎲 Меню игр"),
         BotCommand(command="wash", description="🧼 Записаться на мойку"),
-
     ]
+
+    # 1. Устанавливаем общие команды для всех (включая админов, но они перезапишутся позже)
     await bot.set_my_commands(common_commands, scope=BotCommandScopeAllPrivateChats())
 
+    # 2. Админские команды (только для конкретных админов)
     admin_commands = [
-        BotCommand(command="admin_panel", description="🏍Меню админа"),
+        BotCommand(command="admin_panel", description="🏍 Меню админа"),
     ]
-    for admin_id in ADMIN_IDS:
-        await bot.set_my_commands(common_commands + admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
 
-    await bot.set_my_commands([], scope=BotCommandScopeChat(chat_id=GROUP_CHAT_ID))
+    for admin_id in ADMIN_IDS:
+        try:
+            # Проверяем, что бот может общаться с этим админом (он уже написал боту)
+            await bot.get_chat(admin_id)
+            # Устанавливаем команды: общие + админские
+            await bot.set_my_commands(
+                common_commands + admin_commands,
+                scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+        except Exception as e:
+            # Если админ ещё не писал боту — пропускаем, команды установятся позже
+            logger.warning(f"Не удалось установить команды для админа {admin_id}: {e}")
+            continue
+
+    # 3. В группе команды не нужны (очищаем)
+    try:
+        await bot.set_my_commands([], scope=BotCommandScopeChat(chat_id=GROUP_CHAT_ID))
+    except Exception:
+        pass  # группа может быть недоступна при локальном тестировании
 
 async def main():
     setup_logger(level=LOG_LEVEL)
@@ -71,11 +93,13 @@ async def main():
     dp.include_router(common.router)
     dp.include_router(group_events.router)
     dp.include_router(ride_commands.router)
-    dp.include_router(tictactoe.router)   
+    dp.include_router(tictactoe.router) 
+    dp.include_router(spam_router)   
     asyncio.create_task(check_expired_active_users(bot))
     asyncio.create_task(check_expired_rides(bot))
     asyncio.create_task(cleanup_daily_topics(bot))
     asyncio.create_task(check_timeout_games())
+
 
     await set_commands(bot)
     

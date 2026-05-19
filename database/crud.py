@@ -4,7 +4,7 @@ from .engine import get_session
 from datetime import datetime, timedelta
 import logging
 from sqlalchemy import and_, or_
-
+import asyncio
 
 from .models import DailyActiveTopic
 from .models import User, Ride, RideParticipant, DailyActiveTopic, Setting
@@ -346,20 +346,22 @@ def _update_stats(player_x_id: int, player_o_id: int, winner_id: int = None):
 def finish_game(game_id: int, winner: int = None, bot=None, chat_id=None, thread_id=None):
     with get_session() as session:
         game = session.query(Game).filter(Game.id == game_id).first()
-        if not game or game.status != 'active':
+        if not game or game.status not in ('active', 'waiting_deletion'):
             return
-        # Обновляем победителя
         if winner:
             game.winner_id = winner
-        game.status = 'waiting_deletion'   # новая стадия
+        game.status = 'waiting_deletion'   # сначала переводим в ожидание удаления
         game.finished_at = datetime.now()
         session.commit()
         # Обновляем статистику
         _update_stats(game.player_x_id, game.player_o_id, winner)
-        # Запускаем отложенное удаление темы
+        
+        # Если передан бот и данные о теме — запускаем отложенное удаление
         if bot and chat_id and thread_id:
             schedule_game_cleanup(game_id, chat_id, thread_id, bot)
-        return game
+        else:
+            # Если бот не передан, сразу переводим в finished (чтобы не блокировать новые игры)
+            finalize_game(game_id)
 
 def _update_stats(player_x_id: int, player_o_id: int, winner_id: int = None):
     with get_session() as session:
@@ -465,14 +467,15 @@ def finish_game_timeout(game_id: int):
             finish_game(game_id, winner=game.turn_id)
 
 def reset_all_active_games():
-    """Завершает все активные игры (ставит статус finished и проставляет время окончания)."""
+    """Завершает все активные игры и игры, ожидающие удаления."""
     with get_session() as session:
-        session.query(Game).filter(Game.status == 'active').update(
+        # Игры со статусом 'active' или 'waiting_deletion' переводим в 'finished'
+        session.query(Game).filter(Game.status.in_(['active', 'waiting_deletion'])).update(
             {'status': 'finished', 'finished_at': datetime.now()}
         )
         session.commit()
 
-import asyncio
+
 
 def schedule_game_cleanup(game_id: int, chat_id: int, thread_id: int, bot):
     """Запускает отложенное удаление темы через 60 секунд."""
