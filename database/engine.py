@@ -1,13 +1,14 @@
-# database/engine.py
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from config import DB_URL
 from .models import Base
 from contextlib import contextmanager
 
-# Синхронный движок (только синхронный)
-sync_engine = create_engine(DB_URL, echo=False)
-SyncSessionLocal = sessionmaker(bind=sync_engine, class_=Session)
+# Синхронный движок
+engine = create_engine(DB_URL, echo=False)
+
+# Фабрика сессий с отключением expire_on_commit
+SyncSessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 @contextmanager
 def get_session():
@@ -23,7 +24,7 @@ def get_session():
         session.close()
 
 def init_db():
-    Base.metadata.create_all(bind=sync_engine)
+    Base.metadata.create_all(bind=engine)
 
 def close_db():
-    sync_engine.dispose()
+    engine.dispose()

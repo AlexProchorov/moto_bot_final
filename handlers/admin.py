@@ -12,6 +12,7 @@ import asyncio
 from datetime import datetime, timedelta
 import html
 from collections import Counter
+from database.wash_crud import is_worker, add_worker, get_all_workers, delete_worker  # не обязательно, но для can_manage
 
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,15 @@ router = Router(name="admin")
 
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
+
+# ---------- FSM для анонса ----------
+class AnnounceStates(StatesGroup):
+    waiting_text = State()
+    waiting_photo = State()
+    waiting_confirm = State()
+
+# Временное хранилище данных анонса (по user_id)
+user_announce_data = {}
 
 # ---------- Панель администратора ----------
 @router.message(Command("admin_panel"))
@@ -28,6 +38,7 @@ async def admin_panel_cmd(message: Message):
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Инициализировать регистрацию", callback_data="admin:init")],
+        [InlineKeyboardButton(text="📢 Сделать анонс", callback_data="admin:announce")],
         [InlineKeyboardButton(text="📋 Список участников", callback_data="admin:participants")],
         [InlineKeyboardButton(text="🎂 Дни рождения (все)", callback_data="admin:bd_all")],
         [InlineKeyboardButton(text="🎂 Ближайшие ДР (30 дней)", callback_data="admin:bd_soon")],
@@ -36,12 +47,13 @@ async def admin_panel_cmd(message: Message):
         [InlineKeyboardButton(text="🔇 Замутить пользователя", callback_data="admin:mute")],
         [InlineKeyboardButton(text="➕ Создать плановый заезд", callback_data="admin:new_ride")],
         [InlineKeyboardButton(text="🏁 Отменить плановый заезд", callback_data="admin:end_ride")],
+        [InlineKeyboardButton(text="🧼 Настройка мойки", callback_data="admin:wash_settings")],
     ])
     await message.answer("🛠 *Панель администратора*\nВыберите действие:", reply_markup=kb, parse_mode="Markdown")
 
 # ---------- Обработчик кнопок ----------
 @router.callback_query(F.data.startswith("admin:"))
-async def admin_callback_handler(callback: CallbackQuery):
+async def admin_callback_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     action = callback.data.split(":")[1]
     user_id = callback.from_user.id
@@ -64,13 +76,18 @@ async def admin_callback_handler(callback: CallbackQuery):
         await callback.message.answer("✅ Кнопка регистрации отправлена в группу.")
         logger.info("Admin %s sent init message to group", user_id)
 
+    elif action == "announce":
+        # Запускаем процесс создания анонса
+        await callback.message.answer("📢 Введите текст анонса (можно использовать HTML-разметку):")
+        await state.set_state(AnnounceStates.waiting_text)
+        await state.update_data(original_msg_id=callback.message.message_id)
+
     elif action == "participants":
         await show_participants_panel(callback.message)
     elif action == "stats_bikes":
         await stats_bikes_callback(callback)
     elif action == "detailed_list":
         await detailed_list_callback(callback)
-
 
     elif action == "bd_all":
         birthdays = get_all_birthdays_sorted()
@@ -113,24 +130,146 @@ async def admin_callback_handler(callback: CallbackQuery):
             "Для отмены планового заезда используйте команду `/end_ride <id_заезда>` в ЛС.\n"
             "ID заезда можно узнать командой `/rides`."
         )
+    elif action == "wash_settings":
+        if not (is_admin(user_id) or is_worker(user_id)):
+            await callback.answer("⛔ Доступ запрещён.", show_alert=True)
+            return
+        from handlers.wash_settings import admin_wash_settings
+        await admin_wash_settings(callback)
+
     else:
         await callback.message.answer("Неизвестное действие.")
 
-# ---------- Остальные админ-команды (init, participants_info, bd_info, weather_on/off, mute_user, get_user_id) ----------
-# Они уже есть в вашем файле, я их не удаляю. Просто убедитесь, что они не дублируются.
+# ---------- FSM хэндлеры для анонса ----------
+@router.message(AnnounceStates.waiting_text)
+async def announce_text(message: Message, state: FSMContext):
+    # Сохраняем текст с поддержкой HTML
+    await state.update_data(text=message.html_text, entities=message.entities)
+    await state.set_state(AnnounceStates.waiting_photo)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏩ Пропустить фото", callback_data="announce_skip_photo")]
+    ])
+    await message.answer("🖼 Теперь отправьте фото (одно). Или нажмите «Пропустить фото»:", reply_markup=kb)
 
+@router.callback_query(F.data == "announce_skip_photo")
+async def skip_photo(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(photo_file_id=None, photo_type=None)
+    await callback.answer()
+    await state.set_state(AnnounceStates.waiting_confirm)
+    await show_announce_preview(callback.message, state, callback.bot)
+
+@router.message(AnnounceStates.waiting_photo, F.photo)
+async def announce_photo(message: Message, state: FSMContext):
+    photo = message.photo[-1]  # лучшее качество
+    await state.update_data(photo_file_id=photo.file_id, photo_type="file_id")
+    await state.set_state(AnnounceStates.waiting_confirm)
+    await show_announce_preview(message, state, message.bot)
+
+@router.message(AnnounceStates.waiting_photo)
+async def announce_photo_invalid(message: Message):
+    await message.answer("❌ Пожалуйста, отправьте фото или нажмите «Пропустить фото».")
+
+async def show_announce_preview(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    text = data.get("text", "")
+    photo_file_id = data.get("photo_file_id")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить анонс", callback_data="announce_send")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="announce_cancel")]
+    ])
+
+    if photo_file_id:
+        await message.answer_photo(
+            photo=photo_file_id,
+            caption=text,
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+    else:
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+    await message.answer("👇 Подтвердите отправку анонса:")
+
+@router.callback_query(F.data == "announce_send")
+async def send_announce(callback: CallbackQuery, state: FSMContext):
+    await callback.answer("⏳ Начинаем рассылку...")
+    data = await state.get_data()
+    text = data.get("text", "")
+    photo_file_id = data.get("photo_file_id")
+
+    # Получаем всех пользователей из БД
+    users = get_all_users()
+    success_count = 0
+    fail_count = 0
+
+    # Рассылка в ЛС
+    for user in users:
+        try:
+            if photo_file_id:
+                await callback.bot.send_photo(
+                    chat_id=user['id'],
+                    photo=photo_file_id,
+                    caption=text,
+                    parse_mode="HTML"
+                )
+            else:
+                await callback.bot.send_message(
+                    chat_id=user['id'],
+                    text=text,
+                    parse_mode="HTML"
+                )
+            success_count += 1
+            await asyncio.sleep(0.05)  # защита от флуда
+        except Exception as e:
+            logger.error(f"Не удалось отправить анонс пользователю {user['id']}: {e}")
+            fail_count += 1
+
+    # Отправка в общий чат
+    try:
+        if photo_file_id:
+            await callback.bot.send_photo(
+                chat_id=GROUP_CHAT_ID,
+                photo=photo_file_id,
+                caption=text,
+                parse_mode="HTML"
+            )
+        else:
+            await callback.bot.send_message(
+                chat_id=GROUP_CHAT_ID,
+                text=text,
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.error(f"Не удалось отправить анонс в группу: {e}")
+
+    # Итоговое сообщение админу
+    await callback.message.answer(
+        f"✅ Анонс отправлен!\n"
+        f"📨 В ЛС: {success_count} пользователей\n"
+        f"❌ Ошибок: {fail_count}\n"
+        f"📢 Группа: анонс опубликован."
+    )
+    await state.clear()
+
+@router.callback_query(F.data == "announce_cancel")
+async def cancel_announce(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("❌ Анонс отменён.")
+    await callback.answer()
+
+# ---------- Остальные вспомогательные функции ----------
 async def show_participants_panel(message: Message):
-    # 1. Количество зарегистрированных в боте
-    from database.crud import get_registered_users_count
     registered_count = get_registered_users_count()
-    # 2. Общее количество участников в группе
     try:
         total_users = await message.bot.get_chat_member_count(GROUP_CHAT_ID)
     except Exception as e:
         total_users = "неизвестно"
         logger.error(f"Ошибка получения количества участников группы: {e}")
 
-    # Клавиатура
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика по мотоциклам", callback_data="admin:stats_bikes")],
         [InlineKeyboardButton(text="📋 Подробный список участников", callback_data="admin:detailed_list")],
@@ -143,8 +282,6 @@ async def show_participants_panel(message: Message):
         reply_markup=kb,
         parse_mode="Markdown"
     )
-
-
 
 async def stats_bikes_callback(callback: CallbackQuery):
     """Выводит статистику по маркам и моделям мотоциклов."""
@@ -189,16 +326,13 @@ async def stats_bikes_callback(callback: CallbackQuery):
         await callback.message.answer("❌ Не удалось получить статистику.")
 
 async def detailed_list_callback(callback: CallbackQuery):
-    """Выводит подробный список участников."""
+    """Выводит подробный список участников с районом."""
     try:
         users = get_all_users()
         if not users:
             await callback.message.answer("📭 Нет зарегистрированных участников.")
             return
 
-        # Получаем округа для всех пользователей
-        from database.engine import get_session
-        from database.models import User
         district_map = {}
         with get_session() as session:
             for u in session.query(User.telegram_id, User.district).all():
@@ -218,7 +352,7 @@ async def detailed_list_callback(callback: CallbackQuery):
                 mention = f'<a href="tg://user?id={uid}">{name}</a>'
 
             text += f"• {mention} — {bike} — {district}\n"
-            if len(text) > 3800:   # оставляем запас для сообщения
+            if len(text) > 3800:
                 await callback.message.answer(text, parse_mode="HTML")
                 text = ""
 
