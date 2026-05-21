@@ -15,11 +15,14 @@ from middleware.admin_check import AdminCheckMiddleware
 from handlers import tictactoe 
 from aiohttp import ClientSession
 from utils.game_scheduler import check_timeout_games
+from handlers.announcement import router as announce_router
 
 from aiohttp_socks import ProxyConnector
 from aiogram import Bot
 from handlers import ride_commands
 from handlers.spam_handler import router as spam_router  
+from handlers.wash_settings import router as wash_settings_router
+from database.wash_crud import init_default_subtypes
 
 
 
@@ -78,12 +81,16 @@ async def main():
     init_db()
 
     bot = Bot(token=BOT_TOKEN)
+
+
+    # Добавление исполнителей из .env
+    
     
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage) 
     dp.message.middleware(AdminCheckMiddleware())
     dp.callback_query.middleware(AdminCheckMiddleware())
-    
+    init_default_subtypes()
     start_scheduler(bot)
     registration.router.mapping = mapping
     asyncio.create_task(weather_scheduler_loop(bot))
@@ -94,11 +101,15 @@ async def main():
     dp.include_router(group_events.router)
     dp.include_router(ride_commands.router)
     dp.include_router(tictactoe.router) 
-    dp.include_router(spam_router)   
+    dp.include_router(spam_router)  
+    dp.include_router(announce_router)
+    dp.include_router(wash_settings_router) 
     asyncio.create_task(check_expired_active_users(bot))
     asyncio.create_task(check_expired_rides(bot))
     asyncio.create_task(cleanup_daily_topics(bot))
     asyncio.create_task(check_timeout_games())
+
+
 
 
     await set_commands(bot)
@@ -114,6 +125,10 @@ async def main():
     
     close_db()
     await bot.session.close()
+
+
+
+
 
 if __name__ == "__main__":
     asyncio.run(main())

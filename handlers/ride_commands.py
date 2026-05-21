@@ -478,8 +478,8 @@ async def ride_menu_cmd(message: Message):
         [InlineKeyboardButton(text="👥 Активные райдеры", callback_data="ride:active")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="ride:close")]
     ]
-    if is_admin(message.from_user.id):
-        base_buttons.append([InlineKeyboardButton(text="🛠️ Админ-панель заездов", callback_data="ride:admin_panel")])
+    #if is_admin(message.from_user.id):
+        #base_buttons.append([InlineKeyboardButton(text="🛠️ Админ-панель заездов", callback_data="ride:admin_panel")])
     kb = InlineKeyboardMarkup(inline_keyboard=base_buttons)
     await message.answer("🏍️ Меню управления заездами:", reply_markup=kb)
 
