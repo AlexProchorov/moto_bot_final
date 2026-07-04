@@ -130,12 +130,17 @@ async def admin_callback_handler(callback: CallbackQuery, state: FSMContext):
             "Для отмены планового заезда используйте команду `/end_ride <id_заезда>` в ЛС.\n"
             "ID заезда можно узнать командой `/rides`."
         )
+
     elif action == "wash_settings":
+        # Проверяем, имеет ли пользователь доступ (админ или исполнитель)
+        from database.wash_crud import is_worker
         if not (is_admin(user_id) or is_worker(user_id)):
             await callback.answer("⛔ Доступ запрещён.", show_alert=True)
             return
-        from handlers.wash_settings import admin_wash_settings
-        await admin_wash_settings(callback)
+        from handlers.wash_settings import show_wash_settings_menu
+        await show_wash_settings_menu(callback.message, callback.bot)
+        await callback.answer()
+
 
     else:
         await callback.message.answer("Неизвестное действие.")

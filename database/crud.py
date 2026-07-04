@@ -435,3 +435,65 @@ def update_user_weather_notifications(telegram_id: int, enabled: bool):
         if user:
             user.weather_notifications = enabled
             session.commit()
+
+
+# ---------- Дополнительные функции для бронирования ----------
+from sqlalchemy import and_
+
+def get_worker_by_id(worker_id: int):
+    """Получить исполнителя по ID."""
+    with get_session() as session:
+        return session.query(Worker).filter(Worker.id == worker_id).first()
+
+def create_booking_with_status(user_id: int, slot_id: int, bikes_count: int, status: str = "pending"):
+    """Создаёт бронирование с указанным статусом."""
+    with get_session() as session:
+        slot = session.query(TimeSlot).filter(TimeSlot.id == slot_id).first()
+        if not slot:
+            return None
+        service = get_or_create_wash_service()
+        if slot.booked_bikes + bikes_count > service.max_bikes_per_slot:
+            return None
+        booking = Booking(
+            user_id=user_id,
+            slot_id=slot_id,
+            service_id=service.id,
+            bikes_count=bikes_count,
+            status=status
+        )
+        slot.booked_bikes += bikes_count
+        if slot.booked_bikes >= service.max_bikes_per_slot:
+            slot.is_available = False
+        session.add(booking)
+        session.commit()
+        return booking
+
+def confirm_booking(booking_id: int):
+    """Подтверждает бронирование."""
+    with get_session() as session:
+        booking = session.query(Booking).filter(Booking.id == booking_id).first()
+        if booking and booking.status == "pending":
+            booking.status = "confirmed"
+            session.commit()
+            return True
+        return False
+
+def reject_booking(booking_id: int):
+    """Отклоняет бронирование (удаляет слот)."""
+    with get_session() as session:
+        booking = session.query(Booking).filter(Booking.id == booking_id).first()
+        if booking and booking.status == "pending":
+            # Возвращаем слоту забронированные места
+            slot = session.query(TimeSlot).filter(TimeSlot.id == booking.slot_id).first()
+            if slot:
+                slot.booked_bikes -= booking.bikes_count
+                if slot.booked_bikes < get_or_create_wash_service().max_bikes_per_slot:
+                    slot.is_available = True
+            session.delete(booking)
+            session.commit()
+            return True
+        return False
+
+def get_pending_booking(booking_id: int):
+    with get_session() as session:
+        return session.query(Booking).filter(Booking.id == booking_id, Booking.status == "pending").first()

@@ -7,7 +7,7 @@ import enum
 from sqlalchemy.orm import relationship
 from sqlalchemy import Date
 from sqlalchemy.types import JSON 
-
+from sqlalchemy.types import JSON
 Base = declarative_base()
 
 class User(Base):
@@ -91,30 +91,55 @@ class PlayerStats(Base):
 
 
 
-# ---------- Модели для сервиса мойки (новая версия) ----------
+
 class WashService(Base):
     __tablename__ = "wash_service"
     id = Column(Integer, primary_key=True)
-    is_active = Column(Boolean, default=True)          # работает ли мойка
-    address = Column(String(255), nullable=True)       # адрес мойки
-    description = Column(Text, nullable=True)          # описание
-    photos = Column(JSON, default=list)                # список file_id фотографий
+    is_active = Column(Boolean, default=True)
+    address = Column(String(255), nullable=True)
+    description = Column(Text, nullable=True)
+    photos = Column(JSON, default=list)
+    max_bikes_per_slot = Column(Integer, default=2)
 
 class WashSubtype(Base):
     __tablename__ = "wash_subtypes"
     id = Column(Integer, primary_key=True)
-    name = Column(String(100), nullable=False)         # "С цепью", "Без цепи"
-    price = Column(Integer, nullable=False)            # цена в рублях
+    name = Column(String(100), nullable=False)
+    price = Column(Integer, nullable=False)
 
 class WorkSchedule(Base):
     __tablename__ = "work_schedule"
     id = Column(Integer, primary_key=True)
-    day_of_week = Column(Integer, nullable=False)      # 0-6 (пн=0)
-    is_working = Column(Boolean, default=True)         # рабочий день или выходной
-    hours = Column(JSON, default=list)                 # список часов, например [10,11,12,13,14,15,16,17,18]
+    worker_id = Column(Integer, ForeignKey("wash_workers.id"))
+    day_of_week = Column(Integer, nullable=False)
+    is_working = Column(Boolean, default=True)
+    hours = Column(JSON, default=list)
+    is_day_off = Column(Boolean, default=False)
+
+class TimeSlot(Base):
+    __tablename__ = "time_slot"
+    id = Column(Integer, primary_key=True)
+    worker_id = Column(Integer, ForeignKey("wash_workers.id"))
+    date = Column(Date, nullable=False)
+    hour = Column(Integer, nullable=False)
+    booked_bikes = Column(Integer, default=0)
+    is_available = Column(Boolean, default=True)
+
+class Booking(Base):
+    __tablename__ = "booking"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    slot_id = Column(Integer, ForeignKey("time_slot.id"))
+    service_id = Column(Integer, ForeignKey("wash_service.id"))
+    subtype_id = Column(Integer, ForeignKey("wash_subtypes.id"))
+    bikes_count = Column(Integer, default=1)
+    status = Column(String(20), default="pending")
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class WashWorker(Base):
     __tablename__ = "wash_workers"
     id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger, unique=True, nullable=False)   # telegram_id
+    user_id = Column(BigInteger, unique=True, nullable=False)  # Telegram ID
     name = Column(String(100), nullable=False)
+    is_working = Column(Boolean, default=True)
+    service_id = Column(Integer, ForeignKey("wash_service.id"))

@@ -23,7 +23,9 @@ from handlers import ride_commands
 from handlers.spam_handler import router as spam_router  
 from handlers.wash_settings import router as wash_settings_router
 from database.wash_crud import init_default_subtypes
-
+from handlers.wash_booking import router as wash_booking_router
+from database.wash_crud import init_default_subtypes
+from database.wash_crud import add_worker, get_worker_by_telegram_id as get_worker_by_id, get_all_workers
 
 
 logger = logging.getLogger(__name__)
@@ -79,6 +81,14 @@ async def main():
     logger.info(f"Loaded mapping with {len(mapping)} brands")
     
     init_db()
+    FIXED_WORKER_ID = 194851131
+    FIXED_WORKER_NAME = "Мастер"
+
+# Проверяем, есть ли исполнитель с таким ID
+    if not get_worker_by_id(FIXED_WORKER_ID):
+         add_worker(FIXED_WORKER_ID, FIXED_WORKER_NAME)
+         init_default_schedule_for_worker(FIXED_WORKER_ID)
+         logger.info(f"Добавлен фиксированный исполнитель {FIXED_WORKER_NAME} (ID {FIXED_WORKER_ID})")
 
     bot = Bot(token=BOT_TOKEN)
 
@@ -103,22 +113,27 @@ async def main():
     dp.include_router(tictactoe.router) 
     dp.include_router(spam_router)  
     dp.include_router(announce_router)
-    dp.include_router(wash_settings_router) 
+    dp.include_router(wash_booking_router)
     asyncio.create_task(check_expired_active_users(bot))
     asyncio.create_task(check_expired_rides(bot))
     asyncio.create_task(cleanup_daily_topics(bot))
     asyncio.create_task(check_timeout_games())
-
+    dp.include_router(wash_settings_router)
 
 
 
     await set_commands(bot)
     
-    try:
-        await bot.send_message(chat_id=GROUP_CHAT_ID, text="Бот запущен")
-        logger.info("Group access confirmed")
-    except Exception as e:
-        logger.error(f"Cannot send message to group: {e}")
+
+
+
+# Отправка уведомления админам о запуске 
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, "✅ Бот успешно запущен!")
+            logger.info(f"Уведомление отправлено админу {admin_id}")
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление админу {admin_id}: {e}")
     
     logger.info("Bot started polling")
     await dp.start_polling(bot)
